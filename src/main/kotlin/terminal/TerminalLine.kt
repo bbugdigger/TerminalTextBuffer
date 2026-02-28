@@ -169,6 +169,30 @@ class TerminalLine(val width: Int) {
         cells.copyInto(newLine.cells)
         return newLine
     }
+
+    /**
+     * Creates a new TerminalLine with a different width, copying cell content.
+     *
+     * If [newWidth] is larger, extra cells are filled with [Cell.EMPTY].
+     * If [newWidth] is smaller, cells beyond the new width are dropped.
+     * Wide characters that would be split at the new boundary are cleaned up.
+     */
+    fun copyWithWidth(newWidth: Int): TerminalLine {
+        val newLine = TerminalLine(newWidth)
+        val copyCount = minOf(width, newWidth)
+        for (i in 0 until copyCount) {
+            newLine.cells[i] = cells[i]
+        }
+        // Clean up a wide char that got split at the boundary
+        if (copyCount < width && copyCount > 0 && newLine.cells[copyCount - 1].isContinuation) {
+            newLine.cells[copyCount - 1] = Cell.EMPTY
+        }
+        if (copyCount < width && copyCount > 0 && newLine.cells[copyCount - 1].width == 2) {
+            // The main cell of a wide char is at the boundary but continuation is cut off
+            newLine.cells[copyCount - 1] = Cell.EMPTY
+        }
+        return newLine
+    }
     
     // --- Private helpers ---
 

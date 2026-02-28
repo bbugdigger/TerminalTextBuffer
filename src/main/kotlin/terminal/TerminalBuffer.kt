@@ -16,6 +16,9 @@ package terminal
  * scrollback line and row [scrollbackSize] is the first screen line. This provides a unified
  * view over the entire buffer history.
  *
+ * Wide characters (CJK ideographs, fullwidth forms, etc.) are supported. They occupy
+ * 2 columns each: a main cell with `width = 2` followed by a [Cell.CONTINUATION] placeholder.
+ *
  * @property width The number of columns in the buffer.
  * @property height The number of rows visible on screen.
  * @property maxScrollbackSize The maximum number of lines preserved in scrollback history.
@@ -111,6 +114,9 @@ class TerminalBuffer(
      * Writes text at the current cursor position using the current attributes, overwriting
      * existing content.
      *
+     * Wide characters occupy 2 columns. If a wide character doesn't fit at the end of the
+     * current line (only 1 column remaining), the cursor wraps to the next line first.
+     *
      * If the text extends beyond the right edge of the current line, it wraps to the
      * beginning of the next line. If wrapping reaches the bottom of the screen, the top
      * screen line is scrolled into the scrollback and a new empty line is added at the bottom.
@@ -119,13 +125,25 @@ class TerminalBuffer(
      */
     fun writeText(text: String) {
         for (char in text) {
-            if (cursorCol >= width) {
-                // Wrap to the next line
-                cursorCol = 0
-                advanceCursorRow()
+            val charW = Cell.charWidth(char)
+
+            if (charW == 2) {
+                // Wide char: if only 1 col left, wrap first
+                if (cursorCol >= width - 1) {
+                    cursorCol = 0
+                    advanceCursorRow()
+                }
+                screen[cursorRow].setCell(cursorCol, Cell(character = char, attributes = currentAttributes, width = 2))
+                screen[cursorRow].setCell(cursorCol + 1, Cell.CONTINUATION)
+                cursorCol += 2
+            } else {
+                if (cursorCol >= width) {
+                    cursorCol = 0
+                    advanceCursorRow()
+                }
+                screen[cursorRow].setCell(cursorCol, Cell(character = char, attributes = currentAttributes))
+                cursorCol++
             }
-            screen[cursorRow].setCell(cursorCol, Cell(character = char, attributes = currentAttributes))
-            cursorCol++
         }
     }
 
@@ -133,21 +151,34 @@ class TerminalBuffer(
      * Inserts text at the current cursor position using the current attributes, shifting
      * existing content on the current line to the right.
      *
-     * Characters pushed past the line width are truncated. If the inserted text itself
-     * extends beyond the right edge, it wraps to the next line (inserting on each subsequent
-     * line as well). If wrapping reaches the bottom of the screen, the top screen line is
-     * scrolled into scrollback.
+     * Wide characters occupy 2 columns. If a wide character doesn't fit at the end of
+     * the current line, the cursor wraps to the next line first.
+     *
+     * Characters pushed past the line width are truncated. If the cursor reaches the
+     * right edge, it wraps to the next line. If wrapping reaches the bottom of the screen,
+     * the top screen line is scrolled into scrollback.
      *
      * The cursor is advanced to the position after the last inserted character.
      */
     fun insertText(text: String) {
         for (char in text) {
-            if (cursorCol >= width) {
-                cursorCol = 0
-                advanceCursorRow()
+            val charW = Cell.charWidth(char)
+
+            if (charW == 2) {
+                if (cursorCol >= width - 1) {
+                    cursorCol = 0
+                    advanceCursorRow()
+                }
+                screen[cursorRow].insertText(cursorCol, char.toString(), currentAttributes)
+                cursorCol += 2
+            } else {
+                if (cursorCol >= width) {
+                    cursorCol = 0
+                    advanceCursorRow()
+                }
+                screen[cursorRow].insertText(cursorCol, char.toString(), currentAttributes)
+                cursorCol++
             }
-            screen[cursorRow].insertText(cursorCol, char.toString(), currentAttributes)
-            cursorCol++
         }
     }
 

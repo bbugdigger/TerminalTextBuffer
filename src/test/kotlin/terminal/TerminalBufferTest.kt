@@ -880,4 +880,125 @@ class TerminalBufferTest {
         assertEquals(0, buf.cursorCol)
         assertEquals(0, buf.cursorRow)
     }
+
+    // ===== Wide character tests =====
+
+    @Test
+    fun `writeText with wide char places main and continuation cells`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("\u4E16") // 世
+        val row = buf.scrollbackSize
+        assertEquals('\u4E16', buf.getCharAt(0, row))
+        assertEquals(2, buf.cursorCol)
+    }
+
+    @Test
+    fun `writeText with wide char advances cursor by 2`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("\u4E16")
+        assertEquals(2, buf.cursorCol)
+        assertEquals(0, buf.cursorRow)
+    }
+
+    @Test
+    fun `writeText mixed narrow and wide chars`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("A\u4E16B")
+        assertEquals("A\u4E16B", buf.getScreenLine(0))
+        assertEquals(4, buf.cursorCol)
+    }
+
+    @Test
+    fun `writeText wide char wraps when only 1 col remaining`() {
+        val buf = TerminalBuffer(5, 3)
+        // Write 4 narrow chars (fills cols 0-3), then wide char needs 2 cols
+        // Only 1 col left (col 4), so wide char wraps to next line
+        buf.writeText("ABCD\u4E16")
+        assertEquals("ABCD", buf.getScreenLine(0))
+        assertEquals("\u4E16", buf.getScreenLine(1))
+        assertEquals(2, buf.cursorCol)
+        assertEquals(1, buf.cursorRow)
+    }
+
+    @Test
+    fun `writeText wide char at exactly end of line fits`() {
+        val buf = TerminalBuffer(4, 3)
+        // 2 narrow + 1 wide = 4 cols, fits exactly
+        buf.writeText("AB\u4E16")
+        assertEquals("AB\u4E16", buf.getScreenLine(0))
+        assertEquals(4, buf.cursorCol)
+        assertEquals(0, buf.cursorRow)
+    }
+
+    @Test
+    fun `writeText wide char wraps and scrolls at bottom`() {
+        val buf = TerminalBuffer(4, 2)
+        // Fill both rows: "ABCD" on row 0, "EF世" on row 1
+        buf.writeText("ABCD")
+        buf.writeText("EF")
+        // cursor at col 2, row 1. Write wide char: 2 cols left, fits on row 1
+        buf.writeText("\u4E16")
+        assertEquals("ABCD", buf.getScreenLine(0))
+        assertEquals("EF\u4E16", buf.getScreenLine(1))
+
+        // Now write another wide char: cursor at col 4, wraps -> col 0, row needs advance
+        // We're at bottom (row 1), so scrolls. "ABCD" goes to scrollback.
+        buf.writeText("\u4E16")
+        assertEquals(1, buf.scrollbackSize)
+        assertEquals("ABCD", buf.getLine(0))
+        assertEquals("EF\u4E16", buf.getScreenLine(0))
+        assertEquals("\u4E16", buf.getScreenLine(1))
+    }
+
+    @Test
+    fun `writeText multiple wide chars filling screen`() {
+        val buf = TerminalBuffer(4, 2)
+        // Each wide char takes 2 cols, so 2 per row, 4 total fills the screen
+        buf.writeText("\u4E16\u754C\u4F60\u597D") // 世界你好
+        // Row 0: 世界 (4 cols), Row 1: 你好 (4 cols)
+        assertEquals("\u4E16\u754C", buf.getScreenLine(0))
+        assertEquals("\u4F60\u597D", buf.getScreenLine(1))
+    }
+
+    @Test
+    fun `writeText wide char uses current attributes`() {
+        val buf = TerminalBuffer(10, 3)
+        val attrs = CellAttributes(foreground = TerminalColor.RED)
+        buf.setCurrentAttributes(attrs)
+        buf.writeText("\u4E16")
+        val row = buf.scrollbackSize
+        assertEquals(attrs, buf.getAttributesAt(0, row))
+    }
+
+    @Test
+    fun `writeText wide char overwrites existing wide char`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("\u4E16") // wide at 0-1
+        buf.setCursorPosition(0, 0)
+        buf.writeText("AB") // overwrite both cells with narrow chars
+        assertEquals('A', buf.getCharAt(0, buf.scrollbackSize))
+        assertEquals('B', buf.getCharAt(1, buf.scrollbackSize))
+    }
+
+    @Test
+    fun `insertText with wide char`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("ABCD")
+        buf.setCursorPosition(1, 0)
+        buf.insertText("\u4E16")
+        // A, 世(2cols), B, C, D
+        assertEquals("A\u4E16BCD", buf.getScreenLine(0))
+        assertEquals(3, buf.cursorCol)
+    }
+
+    @Test
+    fun `insertText wide char wraps when 1 col remaining`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.setCursorPosition(4, 0)
+        buf.insertText("\u4E16")
+        // Only 1 col left at col 4, wide char wraps to next line
+        assertEquals("\u4E16", buf.getScreenLine(1))
+        assertEquals(2, buf.cursorCol)
+        assertEquals(1, buf.cursorRow)
+    }
 }
