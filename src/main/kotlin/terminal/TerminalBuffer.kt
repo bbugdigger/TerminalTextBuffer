@@ -16,13 +16,16 @@ package terminal
  * scrollback line and row [scrollbackSize] is the first screen line. This provides a unified
  * view over the entire buffer history.
  *
+ * Wide characters (CJK ideographs, fullwidth forms, etc.) are supported. They occupy
+ * 2 columns each: a main cell with `width = 2` followed by a [Cell.CONTINUATION] placeholder.
+ *
  * @property width The number of columns in the buffer.
  * @property height The number of rows visible on screen.
  * @property maxScrollbackSize The maximum number of lines preserved in scrollback history.
  */
 class TerminalBuffer(
-    val width: Int,
-    val height: Int,
+    var width: Int,
+    var height: Int,
     val maxScrollbackSize: Int = 1000,
 ) {
     init {
@@ -111,6 +114,9 @@ class TerminalBuffer(
      * Writes text at the current cursor position using the current attributes, overwriting
      * existing content.
      *
+     * Wide characters occupy 2 columns. If a wide character doesn't fit at the end of the
+     * current line (only 1 column remaining), the cursor wraps to the next line first.
+     *
      * If the text extends beyond the right edge of the current line, it wraps to the
      * beginning of the next line. If wrapping reaches the bottom of the screen, the top
      * screen line is scrolled into the scrollback and a new empty line is added at the bottom.
@@ -119,13 +125,25 @@ class TerminalBuffer(
      */
     fun writeText(text: String) {
         for (char in text) {
-            if (cursorCol >= width) {
-                // Wrap to the next line
-                cursorCol = 0
-                advanceCursorRow()
+            val charW = Cell.charWidth(char)
+
+            if (charW == 2) {
+                // Wide char: if only 1 col left, wrap first
+                if (cursorCol >= width - 1) {
+                    cursorCol = 0
+                    advanceCursorRow()
+                }
+                screen[cursorRow].setCell(cursorCol, Cell(character = char, attributes = currentAttributes, width = 2))
+                screen[cursorRow].setCell(cursorCol + 1, Cell.CONTINUATION)
+                cursorCol += 2
+            } else {
+                if (cursorCol >= width) {
+                    cursorCol = 0
+                    advanceCursorRow()
+                }
+                screen[cursorRow].setCell(cursorCol, Cell(character = char, attributes = currentAttributes))
+                cursorCol++
             }
-            screen[cursorRow].setCell(cursorCol, Cell(character = char, attributes = currentAttributes))
-            cursorCol++
         }
     }
 
@@ -133,21 +151,34 @@ class TerminalBuffer(
      * Inserts text at the current cursor position using the current attributes, shifting
      * existing content on the current line to the right.
      *
-     * Characters pushed past the line width are truncated. If the inserted text itself
-     * extends beyond the right edge, it wraps to the next line (inserting on each subsequent
-     * line as well). If wrapping reaches the bottom of the screen, the top screen line is
-     * scrolled into scrollback.
+     * Wide characters occupy 2 columns. If a wide character doesn't fit at the end of
+     * the current line, the cursor wraps to the next line first.
+     *
+     * Characters pushed past the line width are truncated. If the cursor reaches the
+     * right edge, it wraps to the next line. If wrapping reaches the bottom of the screen,
+     * the top screen line is scrolled into scrollback.
      *
      * The cursor is advanced to the position after the last inserted character.
      */
     fun insertText(text: String) {
         for (char in text) {
-            if (cursorCol >= width) {
-                cursorCol = 0
-                advanceCursorRow()
+            val charW = Cell.charWidth(char)
+
+            if (charW == 2) {
+                if (cursorCol >= width - 1) {
+                    cursorCol = 0
+                    advanceCursorRow()
+                }
+                screen[cursorRow].insertText(cursorCol, char.toString(), currentAttributes)
+                cursorCol += 2
+            } else {
+                if (cursorCol >= width) {
+                    cursorCol = 0
+                    advanceCursorRow()
+                }
+                screen[cursorRow].insertText(cursorCol, char.toString(), currentAttributes)
+                cursorCol++
             }
-            screen[cursorRow].insertText(cursorCol, char.toString(), currentAttributes)
-            cursorCol++
         }
     }
 
@@ -202,6 +233,78 @@ class TerminalBuffer(
     fun clearAll() {
         clearScreen()
         scrollback.clear()
+    }
+
+    // --- Resize ---
+
+    /**
+     * Resizes the buffer to the given dimensions.
+     *
+     * Content handling strategy:
+     * - Lines are truncated or padded to fit the new width. Wide characters that would be
+     *   split at the new boundary are cleaned up (replaced with empty cells).
+     * - If the new height is smaller, excess screen lines are moved to scrollback (from the top).
+     * - If the new height is larger, lines are pulled back from scrollback (if available)
+     *   to fill the new screen space, otherwise empty lines are added.
+     * - The cursor is clamped to the new screen bounds.
+     *
+     * @throws IllegalArgumentException if [newWidth] or [newHeight] is not positive.
+     */
+    fun resize(newWidth: Int, newHeight: Int) {
+        require(newWidth > 0) { "New width must be positive, got $newWidth" }
+        require(newHeight > 0) { "New height must be positive, got $newHeight" }
+
+        // --- Adjust width ---
+        if (newWidth != width) {
+            // Resize all screen lines
+            for (i in screen.indices) {
+                screen[i] = screen[i].copyWithWidth(newWidth)
+            }
+            // Resize all scrollback lines
+            for (i in scrollback.indices) {
+                scrollback[i] = scrollback[i].copyWithWidth(newWidth)
+            }
+        }
+
+        // --- Adjust height ---
+        if (newHeight < height) {
+            // Shrink: move excess top screen lines to scrollback
+            val excessLines = height - newHeight
+            for (i in 0 until excessLines) {
+                val line = screen.removeFirst()
+                if (maxScrollbackSize > 0) {
+                    scrollback.addLast(line)
+                    while (scrollback.size > maxScrollbackSize) {
+                        scrollback.removeFirst()
+                    }
+                }
+            }
+        } else if (newHeight > height) {
+            // Grow: pull lines from scrollback or add empty lines
+            val extraLines = newHeight - height
+            val fromScrollback = minOf(extraLines, scrollback.size)
+
+            // Pull lines from the end of scrollback (most recent) and insert at top of screen
+            for (i in 0 until fromScrollback) {
+                val line = scrollback.removeLast()
+                val resized = if (newWidth != width) line else line
+                screen.add(0, resized)
+            }
+
+            // Fill remaining with empty lines at the bottom
+            val emptyLines = extraLines - fromScrollback
+            for (i in 0 until emptyLines) {
+                screen.add(TerminalLine(newWidth))
+            }
+        }
+
+        // Update dimensions
+        width = newWidth
+        height = newHeight
+
+        // Clamp cursor to new bounds
+        cursorCol = cursorCol.coerceIn(0, width - 1)
+        cursorRow = cursorRow.coerceIn(0, height - 1)
     }
 
     // --- Content access ---
