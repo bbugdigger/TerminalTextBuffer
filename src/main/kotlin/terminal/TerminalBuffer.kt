@@ -24,8 +24,8 @@ package terminal
  * @property maxScrollbackSize The maximum number of lines preserved in scrollback history.
  */
 class TerminalBuffer(
-    val width: Int,
-    val height: Int,
+    var width: Int,
+    var height: Int,
     val maxScrollbackSize: Int = 1000,
 ) {
     init {
@@ -233,6 +233,78 @@ class TerminalBuffer(
     fun clearAll() {
         clearScreen()
         scrollback.clear()
+    }
+
+    // --- Resize ---
+
+    /**
+     * Resizes the buffer to the given dimensions.
+     *
+     * Content handling strategy:
+     * - Lines are truncated or padded to fit the new width. Wide characters that would be
+     *   split at the new boundary are cleaned up (replaced with empty cells).
+     * - If the new height is smaller, excess screen lines are moved to scrollback (from the top).
+     * - If the new height is larger, lines are pulled back from scrollback (if available)
+     *   to fill the new screen space, otherwise empty lines are added.
+     * - The cursor is clamped to the new screen bounds.
+     *
+     * @throws IllegalArgumentException if [newWidth] or [newHeight] is not positive.
+     */
+    fun resize(newWidth: Int, newHeight: Int) {
+        require(newWidth > 0) { "New width must be positive, got $newWidth" }
+        require(newHeight > 0) { "New height must be positive, got $newHeight" }
+
+        // --- Adjust width ---
+        if (newWidth != width) {
+            // Resize all screen lines
+            for (i in screen.indices) {
+                screen[i] = screen[i].copyWithWidth(newWidth)
+            }
+            // Resize all scrollback lines
+            for (i in scrollback.indices) {
+                scrollback[i] = scrollback[i].copyWithWidth(newWidth)
+            }
+        }
+
+        // --- Adjust height ---
+        if (newHeight < height) {
+            // Shrink: move excess top screen lines to scrollback
+            val excessLines = height - newHeight
+            for (i in 0 until excessLines) {
+                val line = screen.removeFirst()
+                if (maxScrollbackSize > 0) {
+                    scrollback.addLast(line)
+                    while (scrollback.size > maxScrollbackSize) {
+                        scrollback.removeFirst()
+                    }
+                }
+            }
+        } else if (newHeight > height) {
+            // Grow: pull lines from scrollback or add empty lines
+            val extraLines = newHeight - height
+            val fromScrollback = minOf(extraLines, scrollback.size)
+
+            // Pull lines from the end of scrollback (most recent) and insert at top of screen
+            for (i in 0 until fromScrollback) {
+                val line = scrollback.removeLast()
+                val resized = if (newWidth != width) line else line
+                screen.add(0, resized)
+            }
+
+            // Fill remaining with empty lines at the bottom
+            val emptyLines = extraLines - fromScrollback
+            for (i in 0 until emptyLines) {
+                screen.add(TerminalLine(newWidth))
+            }
+        }
+
+        // Update dimensions
+        width = newWidth
+        height = newHeight
+
+        // Clamp cursor to new bounds
+        cursorCol = cursorCol.coerceIn(0, width - 1)
+        cursorRow = cursorRow.coerceIn(0, height - 1)
     }
 
     // --- Content access ---

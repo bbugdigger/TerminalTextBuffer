@@ -1001,4 +1001,271 @@ class TerminalBufferTest {
         assertEquals(2, buf.cursorCol)
         assertEquals(1, buf.cursorRow)
     }
+
+    // ===== Resize tests =====
+
+    // --- Resize: width changes ---
+
+    @Test
+    fun `resize to wider width preserves content`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.writeText("Hello")
+        buf.resize(10, 3)
+        assertEquals(10, buf.width)
+        assertEquals("Hello", buf.getScreenLine(0))
+    }
+
+    @Test
+    fun `resize to narrower width truncates content`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("HelloWorld")
+        buf.resize(5, 3)
+        assertEquals(5, buf.width)
+        assertEquals("Hello", buf.getScreenLine(0))
+    }
+
+    @Test
+    fun `resize width changes scrollback lines too`() {
+        val buf = TerminalBuffer(10, 2)
+        buf.writeText("Scrollback")
+        buf.insertEmptyLineAtBottom()
+        assertEquals("Scrollback", buf.getLine(0))
+        buf.resize(5, 2)
+        assertEquals("Scrol", buf.getLine(0))
+    }
+
+    @Test
+    fun `resize same width does not change content`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello")
+        buf.resize(10, 3)
+        assertEquals("Hello", buf.getScreenLine(0))
+    }
+
+    // --- Resize: height changes ---
+
+    @Test
+    fun `resize to shorter height moves lines to scrollback`() {
+        val buf = TerminalBuffer(5, 4)
+        buf.writeText("AAAAA")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("BBBBB")
+        buf.setCursorPosition(0, 2)
+        buf.writeText("CCCCC")
+        buf.setCursorPosition(0, 3)
+        buf.writeText("DDDDD")
+        buf.resize(5, 2)
+        assertEquals(2, buf.height)
+        // Top 2 lines ("AAAAA", "BBBBB") should go to scrollback
+        assertEquals(2, buf.scrollbackSize)
+        assertEquals("AAAAA", buf.getLine(0))
+        assertEquals("BBBBB", buf.getLine(1))
+        assertEquals("CCCCC", buf.getScreenLine(0))
+        assertEquals("DDDDD", buf.getScreenLine(1))
+    }
+
+    @Test
+    fun `resize to taller height pulls from scrollback`() {
+        val buf = TerminalBuffer(5, 2)
+        buf.writeText("AAAAA")
+        buf.insertEmptyLineAtBottom() // "AAAAA" to scrollback
+        buf.setCursorPosition(0, 0)
+        buf.writeText("BBBBB")
+        // Now: scrollback=["AAAAA"], screen=["BBBBB", ""]
+        buf.resize(5, 4)
+        assertEquals(4, buf.height)
+        assertEquals(0, buf.scrollbackSize) // pulled from scrollback
+        assertEquals("AAAAA", buf.getScreenLine(0)) // pulled from scrollback
+        assertEquals("BBBBB", buf.getScreenLine(1))
+        assertEquals("", buf.getScreenLine(2))
+        assertEquals("", buf.getScreenLine(3))
+    }
+
+    @Test
+    fun `resize to taller height adds empty lines when no scrollback`() {
+        val buf = TerminalBuffer(5, 2)
+        buf.writeText("Hello")
+        buf.resize(5, 5)
+        assertEquals(5, buf.height)
+        assertEquals(0, buf.scrollbackSize)
+        assertEquals("Hello", buf.getScreenLine(0))
+        for (i in 1 until 5) {
+            assertEquals("", buf.getScreenLine(i))
+        }
+    }
+
+    @Test
+    fun `resize to taller with partial scrollback fills remainder with empty`() {
+        val buf = TerminalBuffer(5, 2)
+        buf.writeText("AAAAA")
+        buf.insertEmptyLineAtBottom() // "AAAAA" to scrollback
+        buf.setCursorPosition(0, 0)
+        buf.writeText("BBBBB")
+        // scrollback=["AAAAA"], screen=["BBBBB", ""]
+        // Grow to 5 rows: pull 1 from scrollback, need 2 more empty
+        buf.resize(5, 5)
+        assertEquals(5, buf.height)
+        assertEquals(0, buf.scrollbackSize)
+        assertEquals("AAAAA", buf.getScreenLine(0))
+        assertEquals("BBBBB", buf.getScreenLine(1))
+        assertEquals("", buf.getScreenLine(2))
+        assertEquals("", buf.getScreenLine(3))
+        assertEquals("", buf.getScreenLine(4))
+    }
+
+    @Test
+    fun `resize same height does not change anything`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.writeText("Hello")
+        buf.resize(5, 3)
+        assertEquals(3, buf.height)
+        assertEquals("Hello", buf.getScreenLine(0))
+    }
+
+    // --- Resize: cursor clamping ---
+
+    @Test
+    fun `resize clamps cursor column to new width`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.setCursorPosition(8, 0)
+        buf.resize(5, 3)
+        assertEquals(4, buf.cursorCol) // clamped to width-1
+    }
+
+    @Test
+    fun `resize clamps cursor row to new height`() {
+        val buf = TerminalBuffer(10, 5)
+        buf.setCursorPosition(0, 4)
+        buf.resize(10, 3)
+        assertEquals(2, buf.cursorRow) // clamped to height-1
+    }
+
+    @Test
+    fun `resize cursor stays if within new bounds`() {
+        val buf = TerminalBuffer(10, 5)
+        buf.setCursorPosition(3, 2)
+        buf.resize(10, 5)
+        assertEquals(3, buf.cursorCol)
+        assertEquals(2, buf.cursorRow)
+    }
+
+    // --- Resize: both dimensions ---
+
+    @Test
+    fun `resize both width and height simultaneously`() {
+        val buf = TerminalBuffer(10, 4)
+        buf.writeText("HelloWorld")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("FooBar")
+        buf.resize(5, 2)
+        assertEquals(5, buf.width)
+        assertEquals(2, buf.height)
+        // Top 2 rows moved to scrollback, bottom 2 remain on screen
+        assertEquals(2, buf.scrollbackSize)
+        assertEquals("Hello", buf.getLine(0))  // truncated from "HelloWorld"
+        assertEquals("FooBa", buf.getLine(1))  // truncated from "FooBar"
+    }
+
+    // --- Resize: edge cases ---
+
+    @Test
+    fun `resize to 1x1`() {
+        val buf = TerminalBuffer(10, 5)
+        buf.writeText("Hello")
+        buf.resize(1, 1)
+        assertEquals(1, buf.width)
+        assertEquals(1, buf.height)
+        assertEquals(0, buf.cursorCol)
+        assertEquals(0, buf.cursorRow)
+    }
+
+    @Test
+    fun `resize rejects zero width`() {
+        val buf = TerminalBuffer(10, 3)
+        assertFailsWith<IllegalArgumentException> { buf.resize(0, 3) }
+    }
+
+    @Test
+    fun `resize rejects zero height`() {
+        val buf = TerminalBuffer(10, 3)
+        assertFailsWith<IllegalArgumentException> { buf.resize(10, 0) }
+    }
+
+    @Test
+    fun `resize rejects negative dimensions`() {
+        val buf = TerminalBuffer(10, 3)
+        assertFailsWith<IllegalArgumentException> { buf.resize(-1, 3) }
+        assertFailsWith<IllegalArgumentException> { buf.resize(10, -1) }
+    }
+
+    @Test
+    fun `resize shrink height respects max scrollback`() {
+        val buf = TerminalBuffer(5, 4, maxScrollbackSize = 1)
+        buf.writeText("AAAAA")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("BBBBB")
+        buf.setCursorPosition(0, 2)
+        buf.writeText("CCCCC")
+        buf.setCursorPosition(0, 3)
+        buf.writeText("DDDDD")
+        // Shrink from 4 to 2 rows: "AAAAA" and "BBBBB" go to scrollback, but max is 1
+        buf.resize(5, 2)
+        assertEquals(1, buf.scrollbackSize) // only last one kept
+        assertEquals("BBBBB", buf.getLine(0))
+    }
+
+    @Test
+    fun `resize with empty buffer`() {
+        val buf = TerminalBuffer(10, 5)
+        buf.resize(20, 10)
+        assertEquals(20, buf.width)
+        assertEquals(10, buf.height)
+        assertEquals(0, buf.cursorCol)
+        assertEquals(0, buf.cursorRow)
+        assertEquals("", buf.getScreenLine(0))
+    }
+
+    @Test
+    fun `resize width cleans up wide char split at boundary`() {
+        val buf = TerminalBuffer(6, 3)
+        // Write a wide char at cols 4-5
+        buf.setCursorPosition(4, 0)
+        buf.writeText("\u4E16")
+        // Shrink to width 5: continuation at col 5 is cut, main at col 4 should be cleaned up
+        buf.resize(5, 3)
+        assertEquals(' ', buf.getCharAt(4, buf.scrollbackSize))
+    }
+
+    @Test
+    fun `resize preserves content across grow then shrink`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.writeText("Hello")
+        buf.resize(10, 5)
+        assertEquals("Hello", buf.getScreenLine(0))
+        buf.resize(5, 3)
+        // When shrinking from 5 to 3 rows, top 2 lines move to scrollback.
+        // "Hello" was on row 0, so it goes to scrollback along with row 1 (empty).
+        assertEquals(2, buf.scrollbackSize)
+        assertEquals("Hello", buf.getLine(0)) // "Hello" in scrollback
+    }
+
+    @Test
+    fun `resize shrink and grow restores scrollback lines`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.writeText("AAAAA")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("BBBBB")
+        buf.setCursorPosition(0, 2)
+        buf.writeText("CCCCC")
+        // Shrink to 1 row: 2 lines go to scrollback
+        buf.resize(5, 1)
+        assertEquals(2, buf.scrollbackSize)
+        assertEquals("CCCCC", buf.getScreenLine(0))
+        // Grow back to 3: pulls 2 from scrollback
+        buf.resize(5, 3)
+        assertEquals(0, buf.scrollbackSize)
+        assertEquals("AAAAA", buf.getScreenLine(0))
+        assertEquals("BBBBB", buf.getScreenLine(1))
+        assertEquals("CCCCC", buf.getScreenLine(2))
+    }
 }
