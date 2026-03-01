@@ -19,6 +19,18 @@ class TerminalLine(val width: Int) {
         require(width > 0) { "Line width must be positive, got $width" }
     }
 
+    /**
+     * Indicates that this line is a continuation of the previous line due to soft wrapping.
+     *
+     * When text overflows the right edge of the terminal, it wraps to a new line. That new
+     * line is marked with `wrappedFromPrevious = true` to distinguish soft wraps (caused by
+     * line width) from hard wraps (caused by an actual newline character).
+     *
+     * This flag is used during resize to reflow content: soft-wrapped lines are unwrapped
+     * back into their logical line and then re-wrapped to the new terminal width.
+     */
+    var wrappedFromPrevious: Boolean = false
+
     private val cells: Array<Cell> = Array(width) { Cell.EMPTY }
 
     /**
@@ -167,6 +179,7 @@ class TerminalLine(val width: Int) {
     fun copy(): TerminalLine {
         val newLine = TerminalLine(width)
         cells.copyInto(newLine.cells)
+        newLine.wrappedFromPrevious = wrappedFromPrevious
         return newLine
     }
 
@@ -191,6 +204,7 @@ class TerminalLine(val width: Int) {
             // The main cell of a wide char is at the boundary but continuation is cut off
             newLine.cells[copyCount - 1] = Cell.EMPTY
         }
+        newLine.wrappedFromPrevious = wrappedFromPrevious
         return newLine
     }
 
@@ -266,6 +280,14 @@ class TerminalLine(val width: Int) {
             cells[i] = blankCell
         }
     }
+
+    /**
+     * Returns a list of all cells in this line.
+     *
+     * This is used by the reflow algorithm during resize to extract cell content
+     * for unwrapping and re-wrapping logical lines.
+     */
+    fun getCells(): List<Cell> = cells.toList()
 
     // --- Private helpers ---
 
