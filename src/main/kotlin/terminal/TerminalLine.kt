@@ -193,7 +193,80 @@ class TerminalLine(val width: Int) {
         }
         return newLine
     }
-    
+
+    /**
+     * Deletes [n] characters starting at [startCol] on this line, shifting the remaining
+     * cells to the left. Empty cells fill in from the right edge.
+     *
+     * If [startCol] is in the middle of a wide character (on the continuation cell),
+     * the main cell of that wide character is cleaned up. Similarly, if the first cell
+     * that shifts into the deleted region is a continuation half of a wide character,
+     * its main cell is cleaned up.
+     *
+     * This is the line-level implementation of the DCH (Delete Character) escape sequence.
+     * The operation is purely horizontal — no wrapping, no scrolling, no cursor movement.
+     *
+     * @param startCol The column at which to begin deletion.
+     * @param n The number of characters to delete. Clamped to the remaining line width.
+     */
+    fun deleteChars(startCol: Int, n: Int) {
+        if (startCol >= width || n <= 0) return
+        val effectiveN = n.coerceAtMost(width - startCol)
+
+        // Clean up wide char at startCol (cursor might be on a continuation cell)
+        cleanUpWideChar(startCol)
+
+        // Clean up wide char at the first source position (startCol + effectiveN).
+        // If that cell is a continuation, its main cell (which stays in place) becomes orphaned,
+        // and the continuation itself must also be replaced so it doesn't become an artifact
+        // after being shifted into the visible area.
+        val sourceCol = startCol + effectiveN
+        if (sourceCol < width) {
+            val sourceCell = cells[sourceCol]
+            cleanUpWideChar(sourceCol)
+            if (sourceCell.isContinuation) {
+                cells[sourceCol] = Cell.EMPTY
+            }
+        }
+
+        // Shift cells left
+        shiftCellsLeft(startCol, effectiveN)
+    }
+
+    /**
+     * Inserts [n] blank cells at [startCol] on this line, shifting existing content to the right.
+     * Cells pushed past the line width are discarded.
+     *
+     * The inserted blank cells use the provided [attributes]. This matches real terminal
+     * behavior where inserted blanks carry the current SGR attributes.
+     *
+     * If [startCol] is in the middle of a wide character (on the continuation cell),
+     * the main cell of that wide character is cleaned up before the shift.
+     *
+     * This is the line-level implementation of the ICH (Insert Character) escape sequence.
+     * The operation is purely horizontal — no wrapping, no scrolling, no cursor movement.
+     *
+     * @param startCol The column at which to begin insertion.
+     * @param n The number of blank cells to insert. Clamped to the remaining line width.
+     * @param attributes The text attributes to apply to the inserted blank cells.
+     */
+    fun insertBlanks(startCol: Int, n: Int, attributes: CellAttributes = CellAttributes.DEFAULT) {
+        if (startCol >= width || n <= 0) return
+        val effectiveN = n.coerceAtMost(width - startCol)
+
+        // Clean up wide char at startCol (cursor might be on a continuation cell)
+        cleanUpWideChar(startCol)
+
+        // Shift existing cells right to make room
+        shiftCellsRight(startCol, effectiveN)
+
+        // Fill the gap with blank cells using the given attributes
+        val blankCell = Cell(character = ' ', attributes = attributes)
+        for (i in startCol until (startCol + effectiveN).coerceAtMost(width)) {
+            cells[i] = blankCell
+        }
+    }
+
     // --- Private helpers ---
 
     /**
@@ -241,6 +314,23 @@ class TerminalLine(val width: Int) {
 
         // Clear the insertion gap
         for (i in startCol until (startCol + amount).coerceAtMost(width)) {
+            cells[i] = Cell.EMPTY
+        }
+    }
+
+    /**
+     * Shifts cells from [startCol] + [amount] onward to the left by [amount] positions.
+     * The last [amount] cells in the line are filled with [Cell.EMPTY].
+     * Wide characters split by the shift are cleaned up before shifting.
+     */
+    private fun shiftCellsLeft(startCol: Int, amount: Int) {
+        // Shift from left to right to avoid overwriting
+        for (i in startCol until (width - amount)) {
+            cells[i] = cells[i + amount]
+        }
+
+        // Fill the vacated positions at the right edge with EMPTY
+        for (i in (width - amount) until width) {
             cells[i] = Cell.EMPTY
         }
     }

@@ -1721,4 +1721,251 @@ class TerminalBufferTest {
         buf.scrollDown(0)
         assertEquals("AAAAA", buf.getScreenLine(0))
     }
+
+    // ===== deleteChars tests =====
+
+    @Test
+    fun `deleteChars removes characters at cursor and shifts left`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("ABCDEFGH")
+        buf.setCursorPosition(2, 0)
+        buf.deleteChars(3) // delete C, D, E
+        assertEquals("ABFGH", buf.getScreenLine(0))
+    }
+
+    @Test
+    fun `deleteChars does not move cursor`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("ABCDEFGH")
+        buf.setCursorPosition(3, 0)
+        buf.deleteChars(2)
+        assertEquals(3, buf.cursorCol)
+        assertEquals(0, buf.cursorRow)
+    }
+
+    @Test
+    fun `deleteChars only affects current line`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("ABCDEF")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("GHIJKL")
+        buf.setCursorPosition(0, 2)
+        buf.writeText("MNOPQR")
+        buf.setCursorPosition(2, 1)
+        buf.deleteChars(2)
+        assertEquals("ABCDEF", buf.getScreenLine(0))
+        assertEquals("GHKL", buf.getScreenLine(1))
+        assertEquals("MNOPQR", buf.getScreenLine(2))
+    }
+
+    @Test
+    fun `deleteChars with n larger than remaining width is clamped`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.writeText("ABCDE")
+        buf.setCursorPosition(3, 0)
+        buf.deleteChars(100)
+        assertEquals("ABC", buf.getScreenLine(0))
+    }
+
+    @Test
+    fun `deleteChars at column 0 deletes from start`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.writeText("ABCDE")
+        buf.setCursorPosition(0, 0)
+        buf.deleteChars(2)
+        assertEquals("CDE", buf.getScreenLine(0))
+    }
+
+    @Test
+    fun `deleteChars at last column`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.writeText("ABCDE")
+        buf.setCursorPosition(4, 0)
+        buf.deleteChars(1)
+        assertEquals("ABCD", buf.getScreenLine(0))
+    }
+
+    @Test
+    fun `deleteChars wide char at cursor position`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("A\u4E16B") // A, 世(2 cols), B
+        buf.setCursorPosition(1, 0)
+        buf.deleteChars(2) // delete both cells of wide char
+        assertEquals("AB", buf.getScreenLine(0))
+    }
+
+    @Test
+    fun `deleteChars does not affect scroll region`() {
+        val buf = TerminalBuffer(10, 5)
+        buf.writeText("ABCDEFGH")
+        buf.setScrollRegion(1, 3)
+        buf.setCursorPosition(2, 0)
+        buf.deleteChars(2)
+        // Should work normally, no scrolling
+        assertEquals("ABEFGH", buf.getScreenLine(0))
+    }
+
+    @Test
+    fun `deleteChars on non-first row`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.setCursorPosition(0, 2)
+        buf.writeText("ABCDEFGH")
+        buf.setCursorPosition(1, 2)
+        buf.deleteChars(3) // delete B, C, D
+        assertEquals("AEFGH", buf.getScreenLine(2))
+    }
+
+    // ===== insertBlanks tests =====
+
+    @Test
+    fun `insertBlanks shifts content right and inserts blanks`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("ABCDEFGH")
+        buf.setCursorPosition(2, 0)
+        buf.insertBlanks(3)
+        assertEquals("AB   CDEFG", buf.getScreenLine(0).let {
+            // getRawText equivalent: read each cell
+            val sb = StringBuilder()
+            for (col in 0 until 10) {
+                sb.append(buf.getCharAt(col, buf.scrollbackSize))
+            }
+            sb.toString().trimEnd()
+        })
+    }
+
+    @Test
+    fun `insertBlanks does not move cursor`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("ABCDEFGH")
+        buf.setCursorPosition(3, 0)
+        buf.insertBlanks(2)
+        assertEquals(3, buf.cursorCol)
+        assertEquals(0, buf.cursorRow)
+    }
+
+    @Test
+    fun `insertBlanks only affects current line`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("ABCDEF")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("GHIJKL")
+        buf.setCursorPosition(0, 2)
+        buf.writeText("MNOPQR")
+        buf.setCursorPosition(2, 1)
+        buf.insertBlanks(2)
+        assertEquals("ABCDEF", buf.getScreenLine(0))
+        assertEquals("GH  IJKL", buf.getScreenLine(1))
+        assertEquals("MNOPQR", buf.getScreenLine(2))
+    }
+
+    @Test
+    fun `insertBlanks uses current attributes for blanks`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("ABCD")
+        val attrs = CellAttributes(foreground = TerminalColor.RED)
+        buf.setCurrentAttributes(attrs)
+        buf.setCursorPosition(2, 0)
+        buf.insertBlanks(2)
+        assertEquals(attrs, buf.getAttributesAt(2, buf.scrollbackSize))
+        assertEquals(attrs, buf.getAttributesAt(3, buf.scrollbackSize))
+    }
+
+    @Test
+    fun `insertBlanks discards content pushed past width`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.writeText("ABCDE")
+        buf.setCursorPosition(1, 0)
+        buf.insertBlanks(2)
+        // A stays, 2 blanks, B, C — D, E fall off
+        assertEquals("A  BC", buf.getScreenLine(0).let {
+            val sb = StringBuilder()
+            for (col in 0 until 5) {
+                sb.append(buf.getCharAt(col, buf.scrollbackSize))
+            }
+            sb.toString()
+        })
+    }
+
+    @Test
+    fun `insertBlanks at column 0`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.writeText("ABCDE")
+        buf.setCursorPosition(0, 0)
+        buf.insertBlanks(2)
+        // 2 blanks + A, B, C — D, E fall off
+        val content = buildString {
+            for (col in 0 until 5) {
+                append(buf.getCharAt(col, buf.scrollbackSize))
+            }
+        }
+        assertEquals("  ABC", content)
+    }
+
+    @Test
+    fun `insertBlanks at last column`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.writeText("ABCDE")
+        buf.setCursorPosition(4, 0)
+        buf.insertBlanks(1)
+        // E pushed off, blank at col 4
+        assertEquals("ABCD", buf.getScreenLine(0))
+    }
+
+    @Test
+    fun `insertBlanks with n larger than remaining is clamped`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.writeText("ABCDE")
+        buf.setCursorPosition(3, 0)
+        buf.insertBlanks(100)
+        assertEquals("ABC", buf.getScreenLine(0))
+    }
+
+    @Test
+    fun `insertBlanks does not affect scroll region`() {
+        val buf = TerminalBuffer(10, 5)
+        buf.writeText("ABCDEFGH")
+        buf.setScrollRegion(1, 3)
+        buf.setCursorPosition(2, 0)
+        buf.insertBlanks(2)
+        // Should work normally, no scrolling
+        val content = buildString {
+            for (col in 0 until 10) {
+                append(buf.getCharAt(col, buf.scrollbackSize))
+            }
+        }
+        assertEquals("AB  CDEFGH", content.trimEnd())
+    }
+
+    @Test
+    fun `insertBlanks on non-first row`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.setCursorPosition(0, 2)
+        buf.writeText("ABCDEFGH")
+        buf.setCursorPosition(1, 2)
+        buf.insertBlanks(2)
+        val content = buildString {
+            for (col in 0 until 10) {
+                append(buf.getCharAt(col, buf.scrollbackSize + 2))
+            }
+        }
+        assertEquals("A  BCDEFGH", content.trimEnd())
+    }
+
+    // --- deleteChars and insertBlanks integration ---
+
+    @Test
+    fun `deleteChars then insertBlanks restores line structure`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("ABCDEFGHIJ")
+        buf.setCursorPosition(3, 0)
+        buf.deleteChars(2) // delete D, E -> "ABCFGHIJ  "
+        buf.setCursorPosition(3, 0)
+        buf.insertBlanks(2) // insert 2 blanks at 3 -> "ABC  FGHIJ"
+        val content = buildString {
+            for (col in 0 until 10) {
+                append(buf.getCharAt(col, buf.scrollbackSize))
+            }
+        }
+        assertEquals("ABC  FGHIJ", content)
+    }
 }
