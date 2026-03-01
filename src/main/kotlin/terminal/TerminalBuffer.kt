@@ -225,7 +225,7 @@ class TerminalBuffer(
                 // Wide char: if only 1 col left, wrap first
                 if (cursorCol >= width - 1) {
                     cursorCol = 0
-                    advanceCursorRow()
+                    advanceCursorRow(softWrap = true)
                 }
                 screen[cursorRow].setCell(cursorCol, Cell(character = char, attributes = currentAttributes, width = 2))
                 screen[cursorRow].setCell(cursorCol + 1, Cell.CONTINUATION)
@@ -233,7 +233,7 @@ class TerminalBuffer(
             } else {
                 if (cursorCol >= width) {
                     cursorCol = 0
-                    advanceCursorRow()
+                    advanceCursorRow(softWrap = true)
                 }
                 screen[cursorRow].setCell(cursorCol, Cell(character = char, attributes = currentAttributes))
                 cursorCol++
@@ -261,14 +261,14 @@ class TerminalBuffer(
             if (charW == 2) {
                 if (cursorCol >= width - 1) {
                     cursorCol = 0
-                    advanceCursorRow()
+                    advanceCursorRow(softWrap = true)
                 }
                 screen[cursorRow].insertText(cursorCol, char.toString(), currentAttributes)
                 cursorCol += 2
             } else {
                 if (cursorCol >= width) {
                     cursorCol = 0
-                    advanceCursorRow()
+                    advanceCursorRow(softWrap = true)
                 }
                 screen[cursorRow].insertText(cursorCol, char.toString(), currentAttributes)
                 cursorCol++
@@ -346,6 +346,7 @@ class TerminalBuffer(
     fun clearScreen() {
         for (line in screen) {
             line.clear()
+            line.wrappedFromPrevious = false
         }
         cursorCol = 0
         cursorRow = 0
@@ -366,15 +367,19 @@ class TerminalBuffer(
     // --- Resize ---
 
     /**
-     * Resizes the buffer to the given dimensions.
+     * Resizes the buffer to the given dimensions with content reflow.
      *
      * Content handling strategy:
-     * - Lines are truncated or padded to fit the new width. Wide characters that would be
-     *   split at the new boundary are cleaned up (replaced with empty cells).
-     * - If the new height is smaller, excess screen lines are moved to scrollback (from the top).
-     * - If the new height is larger, lines are pulled back from scrollback (if available)
-     *   to fill the new screen space, otherwise empty lines are added.
-     * - The cursor is clamped to the new screen bounds.
+     * - Soft-wrapped lines (those connected by [TerminalLine.wrappedFromPrevious]) are unwrapped
+     *   back into their logical lines and then re-wrapped to the new width.
+     * - Hard line breaks (where [TerminalLine.wrappedFromPrevious] is false) are preserved.
+     * - Wide characters that don't fit at the end of a line during re-wrapping are moved to the
+     *   next line, matching the behavior of [writeText].
+     * - If re-wrapping produces more lines than fit on screen, excess lines are pushed to scrollback.
+     * - If re-wrapping produces fewer lines, lines are pulled from scrollback (if available) to
+     *   fill the screen, otherwise empty lines are added at the bottom.
+     * - The cursor position is recomputed based on its absolute offset within the logical line,
+     *   so it tracks its logical position through the reflow.
      * - The scroll region is reset to the full screen.
      *
      * @throws IllegalArgumentException if [newWidth] or [newHeight] is not positive.
@@ -383,61 +388,284 @@ class TerminalBuffer(
         require(newWidth > 0) { "New width must be positive, got $newWidth" }
         require(newHeight > 0) { "New height must be positive, got $newHeight" }
 
-        // --- Adjust width ---
-        if (newWidth != width) {
-            // Resize all screen lines
-            for (i in screen.indices) {
-                screen[i] = screen[i].copyWithWidth(newWidth)
-            }
-            // Resize all scrollback lines
-            for (i in scrollback.indices) {
-                scrollback[i] = scrollback[i].copyWithWidth(newWidth)
+        // If nothing changed, no work to do (still reset scroll region for consistency)
+        if (newWidth == width && newHeight == height) {
+            scrollTop = 0
+            scrollBottom = height - 1
+            return
+        }
+
+        // --- Phase 1: Build unified physical line list and locate cursor ---
+
+        val allLines = ArrayList<TerminalLine>(scrollback.size + screen.size)
+        for (line in scrollback) allLines.add(line)
+        for (line in screen) allLines.add(line)
+
+        // Cursor's absolute position in the physical line list
+        val cursorPhysicalRow = scrollback.size + cursorRow
+
+        // Trim trailing empty lines from the end of the buffer.
+        // Empty screen lines below content are just padding and shouldn't produce
+        // extra logical lines that push content into scrollback during reflow.
+        // We keep at least up to the cursor row + 1.
+        val keepAtLeast = cursorPhysicalRow + 1
+        while (allLines.size > keepAtLeast && isLineEmpty(allLines.last())) {
+            allLines.removeAt(allLines.size - 1)
+        }
+
+        // --- Phase 2: Group physical lines into logical lines ---
+        // A logical line is a sequence of physical lines where all but the first have
+        // wrappedFromPrevious = true.
+
+        val logicalLines = mutableListOf<LogicalLine>()
+        var currentLogicalCells = mutableListOf<Cell>()
+        var currentLogicalStartRow = 0
+
+        for (i in allLines.indices) {
+            val line = allLines[i]
+
+            if (i > 0 && line.wrappedFromPrevious) {
+                // Continuation of the previous logical line.
+                // Strip trailing empty cells from the PREVIOUS segment before appending,
+                // because those trailing empties are just padding to fill the line width.
+                stripTrailingEmptyCells(currentLogicalCells)
+                // Append this line's cells
+                currentLogicalCells.addAll(line.getCells())
+            } else {
+                // Start of a new logical line
+                if (i > 0) {
+                    // Save the previous logical line
+                    logicalLines.add(LogicalLine(currentLogicalCells, currentLogicalStartRow))
+                }
+                currentLogicalCells = line.getCells().toMutableList()
+                currentLogicalStartRow = i
             }
         }
 
-        // --- Adjust height ---
-        if (newHeight < height) {
-            // Shrink: move excess top screen lines to scrollback
-            val excessLines = height - newHeight
-            for (i in 0 until excessLines) {
-                val line = screen.removeFirst()
-                if (maxScrollbackSize > 0) {
-                    scrollback.addLast(line)
-                    while (scrollback.size > maxScrollbackSize) {
-                        scrollback.removeFirst()
+        // Don't forget the last logical line
+        logicalLines.add(LogicalLine(currentLogicalCells, currentLogicalStartRow))
+
+        // --- Phase 3: Compute cursor's absolute offset within its logical line ---
+
+        var cursorAbsoluteOffset = 0
+        var cursorLogicalLineIndex = -1
+
+        for ((logIdx, logical) in logicalLines.withIndex()) {
+            val logicalEndRow = if (logIdx + 1 < logicalLines.size) {
+                logicalLines[logIdx + 1].startPhysicalRow - 1
+            } else {
+                allLines.size - 1
+            }
+
+            if (cursorPhysicalRow in logical.startPhysicalRow..logicalEndRow) {
+                cursorLogicalLineIndex = logIdx
+                // Count the offset: sum up columns in all physical lines before cursorPhysicalRow,
+                // then add cursorCol.
+                var offset = 0
+                for (physRow in logical.startPhysicalRow until cursorPhysicalRow) {
+                    offset += countContentColumns(allLines[physRow], width)
+                }
+                offset += cursorCol
+                cursorAbsoluteOffset = offset
+                break
+            }
+        }
+
+        // --- Phase 4: Re-wrap each logical line to newWidth ---
+
+        val rewrappedLines = mutableListOf<TerminalLine>()
+        var newCursorRow = 0
+        var newCursorCol = 0
+
+        for ((logIdx, logical) in logicalLines.withIndex()) {
+            // Strip trailing empty cells from the logical line
+            val cells = logical.cells.toMutableList()
+            stripTrailingEmptyCells(cells)
+
+            val linesBeforeThisLogical = rewrappedLines.size
+
+            if (cells.isEmpty()) {
+                // Empty logical line → produce one empty physical line
+                rewrappedLines.add(TerminalLine(newWidth))
+            } else {
+                // Re-wrap cells into lines of newWidth
+                var col = 0
+                var currentLine = TerminalLine(newWidth)
+                rewrappedLines.add(currentLine)
+
+                var cellIdx = 0
+                while (cellIdx < cells.size) {
+                    val cell = cells[cellIdx]
+
+                    // Skip continuation cells — they're part of a wide char and will be
+                    // re-created when we place the wide char's main cell
+                    if (cell.isContinuation) {
+                        cellIdx++
+                        continue
                     }
+
+                    if (cell.width == 2) {
+                        // Wide character: needs 2 columns
+                        if (col >= newWidth - 1) {
+                            // Doesn't fit on this line, wrap to next
+                            val newLine = TerminalLine(newWidth)
+                            newLine.wrappedFromPrevious = true
+                            rewrappedLines.add(newLine)
+                            currentLine = newLine
+                            col = 0
+                        }
+                        currentLine.setCell(col, cell)
+                        currentLine.setCell(col + 1, Cell.CONTINUATION)
+                        col += 2
+                    } else {
+                        // Normal character
+                        if (col >= newWidth) {
+                            // Wrap to next line
+                            val newLine = TerminalLine(newWidth)
+                            newLine.wrappedFromPrevious = true
+                            rewrappedLines.add(newLine)
+                            currentLine = newLine
+                            col = 0
+                        }
+                        currentLine.setCell(col, cell)
+                        col++
+                    }
+
+                    cellIdx++
                 }
             }
-        } else if (newHeight > height) {
-            // Grow: pull lines from scrollback or add empty lines
-            val extraLines = newHeight - height
-            val fromScrollback = minOf(extraLines, scrollback.size)
 
-            // Pull lines from the end of scrollback (most recent) and insert at top of screen
-            for (i in 0 until fromScrollback) {
-                val line = scrollback.removeLast()
-                val resized = if (newWidth != width) line else line
-                screen.add(0, resized)
-            }
+            // --- Recompute cursor position if this is the cursor's logical line ---
+            if (logIdx == cursorLogicalLineIndex) {
+                // Walk through the rewrapped physical lines for this logical line
+                // to find where cursorAbsoluteOffset lands
+                var remaining = cursorAbsoluteOffset
+                var found = false
 
-            // Fill remaining with empty lines at the bottom
-            val emptyLines = extraLines - fromScrollback
-            for (i in 0 until emptyLines) {
-                screen.add(TerminalLine(newWidth))
+                for (physIdx in linesBeforeThisLogical until rewrappedLines.size) {
+                    val lineColCount = countContentColumns(rewrappedLines[physIdx], newWidth)
+                    if (remaining <= lineColCount) {
+                        // Cursor is on this physical line
+                        newCursorRow = physIdx
+                        newCursorCol = remaining
+                        found = true
+                        break
+                    }
+                    remaining -= lineColCount
+                }
+
+                if (!found) {
+                    // Cursor was past the end of content — place at end of last line
+                    newCursorRow = rewrappedLines.size - 1
+                    newCursorCol = countContentColumns(rewrappedLines.last(), newWidth)
+                }
             }
         }
 
-        // Update dimensions
+        // --- Phase 5: Split rewrapped lines into scrollback and screen ---
+
+        scrollback.clear()
+        screen.clear()
+
+        val totalLines = rewrappedLines.size
+
+        if (totalLines <= newHeight) {
+            // Fewer lines than screen height: all go to screen, pad with empties
+            for (line in rewrappedLines) {
+                screen.add(line)
+            }
+            val emptyCount = newHeight - totalLines
+            for (i in 0 until emptyCount) {
+                screen.add(TerminalLine(newWidth))
+            }
+            // Adjust cursor row (it's currently an index into rewrappedLines)
+            // newCursorRow is already correct as a screen row since all lines are on screen
+        } else {
+            // More lines than screen height: excess go to scrollback
+            val scrollbackCount = totalLines - newHeight
+
+            for (i in 0 until scrollbackCount) {
+                scrollback.addLast(rewrappedLines[i])
+            }
+            for (i in scrollbackCount until totalLines) {
+                screen.add(rewrappedLines[i])
+            }
+
+            // Adjust cursor row: it's an index into rewrappedLines, convert to screen row
+            newCursorRow -= scrollbackCount
+
+            // Trim scrollback to max size
+            while (scrollback.size > maxScrollbackSize) {
+                scrollback.removeFirst()
+            }
+        }
+
+        // --- Phase 6: Update dimensions and cursor ---
         width = newWidth
         height = newHeight
 
-        // Clamp cursor to new bounds
-        cursorCol = cursorCol.coerceIn(0, width - 1)
-        cursorRow = cursorRow.coerceIn(0, height - 1)
+        // Clamp cursor to screen bounds (safety measure)
+        cursorCol = newCursorCol.coerceIn(0, width - 1)
+        cursorRow = newCursorRow.coerceIn(0, height - 1)
 
         // Reset scroll region to full screen
         scrollTop = 0
         scrollBottom = height - 1
+    }
+
+    /**
+     * Represents a logical line: a sequence of cells that form a single logical line of text,
+     * possibly spanning multiple physical lines due to soft wrapping.
+     *
+     * @property cells All cells in this logical line, concatenated from the physical lines.
+     * @property startPhysicalRow The index of the first physical line in the unified line list.
+     */
+    private data class LogicalLine(
+        val cells: List<Cell>,
+        val startPhysicalRow: Int,
+    )
+
+    /**
+     * Counts the number of "content columns" used by a physical line.
+     *
+     * This returns the line width (number of columns), accounting for the fact that
+     * content may fill the entire line during wrapping. For cursor offset computation,
+     * we count the effective width that was used for content on this line.
+     */
+    private fun countContentColumns(line: TerminalLine, lineWidth: Int): Int {
+        // For wrapped lines, the entire line width was used for content
+        // (trailing empties were just padding within the line width).
+        // For non-wrapped last lines, we still need to count the full width
+        // to properly compute cursor positions.
+        return lineWidth
+    }
+
+    /**
+     * Removes trailing empty cells from a mutable cell list in-place.
+     * Empty cells are those that are [Cell.EMPTY] (space char with default attributes).
+     * Continuation cells at the end are also removed.
+     */
+    private fun stripTrailingEmptyCells(cells: MutableList<Cell>) {
+        while (cells.isNotEmpty() && (cells.last().isEmpty || cells.last().isContinuation)) {
+            cells.removeAt(cells.size - 1)
+        }
+        // If the last remaining cell is a wide char (width=2), make sure its continuation isn't lost
+        // (it would have been removed above). We need to re-add it.
+        if (cells.isNotEmpty() && cells.last().width == 2) {
+            cells.add(Cell.CONTINUATION)
+        }
+    }
+
+    /**
+     * Returns true if a [TerminalLine] is entirely empty (all cells are [Cell.EMPTY])
+     * and it is not a soft-wrap continuation.
+     */
+    private fun isLineEmpty(line: TerminalLine): Boolean {
+        if (line.wrappedFromPrevious) return false
+        for (cell in line.getCells()) {
+            if (!cell.isEmpty) return false
+        }
+        return true
     }
 
     // --- Content access ---
@@ -538,8 +766,12 @@ class TerminalBuffer(
      * - If [scrollTop] > 0, the removed line is discarded (it's an internal region
      *   scroll, not history).
      * - If the cursor is not at the bottom of the region, it simply increments.
+     *
+     * @param softWrap If true, the destination line is marked as a soft-wrap continuation
+     *        of the previous line. This is used to track which line breaks are caused by text
+     *        overflow (soft) vs. actual newlines (hard), enabling content reflow on resize.
      */
-    private fun advanceCursorRow() {
+    private fun advanceCursorRow(softWrap: Boolean = false) {
         if (cursorRow == scrollBottom) {
             // At the bottom of the scroll region — scroll within the region
             val removedLine = screen.removeAt(scrollTop)
@@ -549,9 +781,16 @@ class TerminalBuffer(
                     scrollback.removeFirst()
                 }
             }
-            screen.add(scrollBottom, TerminalLine(width))
+            val newLine = TerminalLine(width)
+            if (softWrap) {
+                newLine.wrappedFromPrevious = true
+            }
+            screen.add(scrollBottom, newLine)
         } else if (cursorRow < height - 1) {
             cursorRow++
+            if (softWrap) {
+                screen[cursorRow].wrappedFromPrevious = true
+            }
         }
     }
 
