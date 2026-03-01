@@ -277,6 +277,37 @@ class TerminalBuffer(
     }
 
     /**
+     * Deletes [n] characters at the current cursor position on the current line,
+     * shifting the remaining content left. Empty cells fill in from the right edge.
+     *
+     * This is the buffer-level implementation of the DCH (Delete Character) escape sequence.
+     * The operation is purely horizontal — it affects only the current line.
+     * The cursor position is NOT modified.
+     *
+     * @param n The number of characters to delete. Clamped to the remaining line width.
+     */
+    fun deleteChars(n: Int) {
+        screen[cursorRow].deleteChars(cursorCol, n)
+    }
+
+    /**
+     * Inserts [n] blank cells at the current cursor position on the current line,
+     * shifting existing content to the right. Content pushed past the line width is discarded.
+     *
+     * The inserted blank cells use the current [currentAttributes]. This matches real
+     * terminal behavior where inserted blanks carry the current SGR attributes.
+     *
+     * This is the buffer-level implementation of the ICH (Insert Character) escape sequence.
+     * The operation is purely horizontal — it affects only the current line.
+     * The cursor position is NOT modified.
+     *
+     * @param n The number of blank cells to insert. Clamped to the remaining line width.
+     */
+    fun insertBlanks(n: Int) {
+        screen[cursorRow].insertBlanks(cursorCol, n, currentAttributes)
+    }
+
+    /**
      * Fills the current cursor's line with the given character using the current attributes.
      *
      * If [char] is null, the line is cleared to empty cells.
