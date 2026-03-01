@@ -19,6 +19,11 @@ package terminal
  * Wide characters (CJK ideographs, fullwidth forms, etc.) are supported. They occupy
  * 2 columns each: a main cell with `width = 2` followed by a [Cell.CONTINUATION] placeholder.
  *
+ * The buffer supports configurable scroll regions (DECSTBM). A scroll region defines a
+ * contiguous range of rows on screen. When the cursor reaches the bottom of the scroll
+ * region, only the lines within the region scroll — lines above and below stay fixed.
+ * By default, the scroll region covers the entire screen.
+ *
  * @property width The number of columns in the buffer.
  * @property height The number of rows visible on screen.
  * @property maxScrollbackSize The maximum number of lines preserved in scrollback history.
@@ -106,6 +111,95 @@ class TerminalBuffer(
     fun moveCursorRight(n: Int = 1) {
         require(n >= 0) { "Movement amount must be non-negative, got $n" }
         cursorCol = (cursorCol + n).coerceAtMost(width - 1)
+    }
+
+    // --- Scroll region ---
+
+    /**
+     * The top row (inclusive) of the scroll region, relative to the screen.
+     * Defaults to 0 (top of screen).
+     */
+    var scrollTop: Int = 0
+        private set
+
+    /**
+     * The bottom row (inclusive) of the scroll region, relative to the screen.
+     * Defaults to [height] - 1 (bottom of screen).
+     */
+    var scrollBottom: Int = height - 1
+        private set
+
+    /**
+     * Sets the scroll region to the given top and bottom margins (both inclusive).
+     *
+     * When the cursor reaches [bottom] and needs to advance, only lines within
+     * [top]..[bottom] scroll. Lines outside the region are unaffected.
+     *
+     * The cursor is reset to position (0, 0) after setting the scroll region,
+     * matching standard DECSTBM terminal behavior.
+     *
+     * @throws IllegalArgumentException if [top] >= [bottom], [top] < 0, or [bottom] >= [height].
+     */
+    fun setScrollRegion(top: Int, bottom: Int) {
+        require(top >= 0) { "Scroll region top must be non-negative, got $top" }
+        require(bottom < height) { "Scroll region bottom must be less than height ($height), got $bottom" }
+        require(top < bottom) { "Scroll region top ($top) must be less than bottom ($bottom)" }
+        scrollTop = top
+        scrollBottom = bottom
+        cursorCol = 0
+        cursorRow = 0
+    }
+
+    /**
+     * Scrolls content within the scroll region up by [n] lines.
+     *
+     * For each scrolled line, the line at [scrollTop] is removed and a new empty line
+     * is inserted at [scrollBottom]. Lines outside the scroll region are unaffected.
+     *
+     * If [scrollTop] is 0, removed lines are pushed to scrollback (respecting
+     * [maxScrollbackSize]). Otherwise they are discarded.
+     *
+     * If [n] exceeds the region height, the entire region is cleared.
+     * The cursor position is not modified.
+     *
+     * @throws IllegalArgumentException if [n] is negative.
+     */
+    fun scrollUp(n: Int = 1) {
+        require(n >= 0) { "Scroll amount must be non-negative, got $n" }
+        val effectiveN = n.coerceAtMost(scrollBottom - scrollTop + 1)
+        for (i in 0 until effectiveN) {
+            val removedLine = screen.removeAt(scrollTop)
+            if (scrollTop == 0 && maxScrollbackSize > 0) {
+                scrollback.addLast(removedLine)
+                while (scrollback.size > maxScrollbackSize) {
+                    scrollback.removeFirst()
+                }
+            }
+            screen.add(scrollBottom, TerminalLine(width))
+        }
+    }
+
+    /**
+     * Scrolls content within the scroll region down by [n] lines.
+     *
+     * For each scrolled line, the line at [scrollBottom] is removed (discarded) and a
+     * new empty line is inserted at [scrollTop]. Lines outside the scroll region are
+     * unaffected.
+     *
+     * Lines removed from the bottom of the region are never pushed to scrollback.
+     *
+     * If [n] exceeds the region height, the entire region is cleared.
+     * The cursor position is not modified.
+     *
+     * @throws IllegalArgumentException if [n] is negative.
+     */
+    fun scrollDown(n: Int = 1) {
+        require(n >= 0) { "Scroll amount must be non-negative, got $n" }
+        val effectiveN = n.coerceAtMost(scrollBottom - scrollTop + 1)
+        for (i in 0 until effectiveN) {
+            screen.removeAt(scrollBottom)
+            screen.add(scrollTop, TerminalLine(width))
+        }
     }
 
     // --- Editing operations (cursor + attributes dependent) ---
@@ -215,7 +309,8 @@ class TerminalBuffer(
     /**
      * Clears the entire screen, resetting all screen lines to empty.
      *
-     * The cursor is reset to position (0, 0). Scrollback is not affected.
+     * The cursor is reset to position (0, 0). The scroll region is reset to the
+     * full screen. Scrollback is not affected.
      */
     fun clearScreen() {
         for (line in screen) {
@@ -223,6 +318,8 @@ class TerminalBuffer(
         }
         cursorCol = 0
         cursorRow = 0
+        scrollTop = 0
+        scrollBottom = height - 1
     }
 
     /**
@@ -247,6 +344,7 @@ class TerminalBuffer(
      * - If the new height is larger, lines are pulled back from scrollback (if available)
      *   to fill the new screen space, otherwise empty lines are added.
      * - The cursor is clamped to the new screen bounds.
+     * - The scroll region is reset to the full screen.
      *
      * @throws IllegalArgumentException if [newWidth] or [newHeight] is not positive.
      */
@@ -305,6 +403,10 @@ class TerminalBuffer(
         // Clamp cursor to new bounds
         cursorCol = cursorCol.coerceIn(0, width - 1)
         cursorRow = cursorRow.coerceIn(0, height - 1)
+
+        // Reset scroll region to full screen
+        scrollTop = 0
+        scrollBottom = height - 1
     }
 
     // --- Content access ---
@@ -394,17 +496,31 @@ class TerminalBuffer(
     // --- Internal helpers ---
 
     /**
-     * Advances the cursor to the next row. If the cursor is already at the bottom
-     * of the screen, scrolls the top line into scrollback and adds a new empty line
-     * at the bottom.
+     * Advances the cursor to the next row. If the cursor is at the bottom of the
+     * scroll region, scrolls content within the region up by one line.
+     *
+     * Scrolling behavior:
+     * - If the cursor is at [scrollBottom], the line at [scrollTop] is removed and
+     *   a new empty line is inserted at [scrollBottom]. Lines outside the region are
+     *   unaffected.
+     * - If [scrollTop] is 0, the removed line is pushed to scrollback.
+     * - If [scrollTop] > 0, the removed line is discarded (it's an internal region
+     *   scroll, not history).
+     * - If the cursor is not at the bottom of the region, it simply increments.
      */
     private fun advanceCursorRow() {
-        if (cursorRow < height - 1) {
+        if (cursorRow == scrollBottom) {
+            // At the bottom of the scroll region — scroll within the region
+            val removedLine = screen.removeAt(scrollTop)
+            if (scrollTop == 0 && maxScrollbackSize > 0) {
+                scrollback.addLast(removedLine)
+                while (scrollback.size > maxScrollbackSize) {
+                    scrollback.removeFirst()
+                }
+            }
+            screen.add(scrollBottom, TerminalLine(width))
+        } else if (cursorRow < height - 1) {
             cursorRow++
-        } else {
-            // At the bottom of the screen — scroll up
-            scrollTopLine()
-            screen.add(TerminalLine(width))
         }
     }
 

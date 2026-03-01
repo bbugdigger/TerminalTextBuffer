@@ -1268,4 +1268,457 @@ class TerminalBufferTest {
         assertEquals("BBBBB", buf.getScreenLine(1))
         assertEquals("CCCCC", buf.getScreenLine(2))
     }
+
+    // ===== Scroll region tests =====
+
+    // --- Default state ---
+
+    @Test
+    fun `default scroll region is full screen`() {
+        val buf = TerminalBuffer(10, 5)
+        assertEquals(0, buf.scrollTop)
+        assertEquals(4, buf.scrollBottom)
+    }
+
+    // --- setScrollRegion ---
+
+    @Test
+    fun `setScrollRegion stores values correctly`() {
+        val buf = TerminalBuffer(10, 5)
+        buf.setScrollRegion(1, 3)
+        assertEquals(1, buf.scrollTop)
+        assertEquals(3, buf.scrollBottom)
+    }
+
+    @Test
+    fun `setScrollRegion resets cursor to 0 0`() {
+        val buf = TerminalBuffer(10, 5)
+        buf.setCursorPosition(5, 3)
+        buf.setScrollRegion(1, 3)
+        assertEquals(0, buf.cursorCol)
+        assertEquals(0, buf.cursorRow)
+    }
+
+    @Test
+    fun `setScrollRegion rejects top greater than or equal to bottom`() {
+        val buf = TerminalBuffer(10, 5)
+        assertFailsWith<IllegalArgumentException> { buf.setScrollRegion(3, 3) }
+        assertFailsWith<IllegalArgumentException> { buf.setScrollRegion(4, 3) }
+    }
+
+    @Test
+    fun `setScrollRegion rejects negative top`() {
+        val buf = TerminalBuffer(10, 5)
+        assertFailsWith<IllegalArgumentException> { buf.setScrollRegion(-1, 3) }
+    }
+
+    @Test
+    fun `setScrollRegion rejects bottom beyond screen`() {
+        val buf = TerminalBuffer(10, 5)
+        assertFailsWith<IllegalArgumentException> { buf.setScrollRegion(0, 5) }
+        assertFailsWith<IllegalArgumentException> { buf.setScrollRegion(0, 10) }
+    }
+
+    // --- Scrolling within a region ---
+
+    @Test
+    fun `writeText wrapping at scrollBottom scrolls only within region`() {
+        val buf = TerminalBuffer(5, 5)
+        // Row 0: "FIXED" (above region)
+        buf.writeText("FIXED")
+        // Set scroll region rows 1-3, cursor resets to (0,0)
+        buf.setScrollRegion(1, 3)
+        // Write into the region
+        buf.setCursorPosition(0, 1)
+        buf.writeText("AAAAA")
+        buf.setCursorPosition(0, 2)
+        buf.writeText("BBBBB")
+        buf.setCursorPosition(0, 3)
+        buf.writeText("CCCCC")
+        // Now cursor is at (5, 3) = end of scrollBottom.
+        // Write more text — should wrap, triggering scroll within region.
+        buf.writeText("DDDDD")
+        // Row 0 "FIXED" should be unaffected
+        assertEquals("FIXED", buf.getScreenLine(0))
+        // Region scrolled: "AAAAA" removed, "BBBBB" moved to row 1, "CCCCC" to row 2,
+        // "DDDDD" written on new empty row 3
+        assertEquals("BBBBB", buf.getScreenLine(1))
+        assertEquals("CCCCC", buf.getScreenLine(2))
+        assertEquals("DDDDD", buf.getScreenLine(3))
+        // Row 4 should be unaffected (below region)
+        assertEquals("", buf.getScreenLine(4))
+    }
+
+    @Test
+    fun `lines above scrollTop are not affected by region scrolling`() {
+        val buf = TerminalBuffer(5, 4)
+        buf.writeText("TOP")
+        buf.setScrollRegion(1, 3)
+        buf.setCursorPosition(0, 1)
+        buf.writeText("AAAAABBBBBCCCCC") // 3 lines of 5, fills region and scrolls
+        assertEquals("TOP", buf.getScreenLine(0)) // unaffected
+    }
+
+    @Test
+    fun `lines below scrollBottom are not affected by region scrolling`() {
+        val buf = TerminalBuffer(5, 5)
+        // Set bottom row content
+        buf.setCursorPosition(0, 4)
+        buf.writeText("BOT")
+        buf.setScrollRegion(0, 3)
+        buf.setCursorPosition(0, 0)
+        // Fill 4 rows and cause scrolling within region
+        buf.writeText("AAAAABBBBBCCCCCDDDDDEEEEEFFFFFGGGGG")
+        assertEquals("BOT", buf.getScreenLine(4)) // unaffected
+    }
+
+    @Test
+    fun `full screen scroll region behaves like default scrolling`() {
+        // This verifies backward compatibility: full-screen region scrolls the same way
+        val buf = TerminalBuffer(5, 2)
+        buf.setScrollRegion(0, 1) // full screen for 2-row buffer
+        buf.writeText("HelloWorldExtra")
+        // "Hello" fills row 0, "World" fills row 1, "Extra" wraps and causes scroll.
+        // "Hello" to scrollback, "World" scrolls up, "Extra" on new bottom row.
+        assertEquals(1, buf.scrollbackSize)
+        assertEquals("Hello", buf.getLine(0))
+        assertEquals("World", buf.getScreenLine(0))
+        assertEquals("Extra", buf.getScreenLine(1))
+    }
+
+    // --- Scrollback interaction ---
+
+    @Test
+    fun `scrolling with scrollTop at 0 pushes to scrollback`() {
+        val buf = TerminalBuffer(5, 4)
+        buf.setScrollRegion(0, 2) // rows 0-2, row 3 is below region
+        buf.setCursorPosition(0, 3)
+        buf.writeText("BELOW")
+        buf.setCursorPosition(0, 0)
+        buf.writeText("AAAAABBBBBCCCCCDDDDD") // fills 4 lines, 3 fit in region, causes scroll
+        // scrollTop == 0, so scrolled-out lines go to scrollback
+        assert(buf.scrollbackSize > 0)
+        assertEquals("BELOW", buf.getScreenLine(3)) // row 3 unaffected
+    }
+
+    @Test
+    fun `scrolling with scrollTop greater than 0 does not push to scrollback`() {
+        val buf = TerminalBuffer(5, 4)
+        buf.setScrollRegion(1, 3)
+        buf.setCursorPosition(0, 1)
+        // Fill region and cause scrolling within it
+        buf.writeText("AAAAABBBBBCCCCCDDDDD")
+        assertEquals(0, buf.scrollbackSize) // nothing pushed to scrollback
+    }
+
+    // --- scrollUp ---
+
+    @Test
+    fun `scrollUp 1 removes top of region and adds empty at bottom`() {
+        val buf = TerminalBuffer(5, 4)
+        buf.writeText("AAAAA")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("BBBBB")
+        buf.setCursorPosition(0, 2)
+        buf.writeText("CCCCC")
+        buf.setCursorPosition(0, 3)
+        buf.writeText("DDDDD")
+        buf.setScrollRegion(1, 3)
+        buf.scrollUp(1)
+        assertEquals("AAAAA", buf.getScreenLine(0)) // above region, unaffected
+        assertEquals("CCCCC", buf.getScreenLine(1)) // was row 2
+        assertEquals("DDDDD", buf.getScreenLine(2)) // was row 3
+        assertEquals("", buf.getScreenLine(3))       // new empty line
+    }
+
+    @Test
+    fun `scrollUp with scrollTop 0 pushes to scrollback`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.writeText("AAAAA")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("BBBBB")
+        buf.setCursorPosition(0, 2)
+        buf.writeText("CCCCC")
+        // Default region: 0-2
+        buf.scrollUp(1)
+        assertEquals(1, buf.scrollbackSize)
+        assertEquals("AAAAA", buf.getLine(0))
+        assertEquals("BBBBB", buf.getScreenLine(0))
+        assertEquals("CCCCC", buf.getScreenLine(1))
+        assertEquals("", buf.getScreenLine(2))
+    }
+
+    @Test
+    fun `scrollUp with scrollTop greater than 0 discards the line`() {
+        val buf = TerminalBuffer(5, 4)
+        buf.writeText("AAAAA")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("BBBBB")
+        buf.setCursorPosition(0, 2)
+        buf.writeText("CCCCC")
+        buf.setCursorPosition(0, 3)
+        buf.writeText("DDDDD")
+        buf.setScrollRegion(1, 3)
+        buf.scrollUp(1)
+        assertEquals(0, buf.scrollbackSize) // "BBBBB" discarded, not pushed
+    }
+
+    @Test
+    fun `scrollUp does not move cursor`() {
+        val buf = TerminalBuffer(5, 4)
+        buf.setCursorPosition(3, 2)
+        buf.setScrollRegion(0, 3)
+        buf.setCursorPosition(3, 2) // set again after setScrollRegion resets
+        buf.scrollUp(1)
+        assertEquals(3, buf.cursorCol)
+        assertEquals(2, buf.cursorRow)
+    }
+
+    @Test
+    fun `scrollUp n greater than region height clears the region`() {
+        val buf = TerminalBuffer(5, 4)
+        buf.writeText("AAAAA")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("BBBBB")
+        buf.setCursorPosition(0, 2)
+        buf.writeText("CCCCC")
+        buf.setCursorPosition(0, 3)
+        buf.writeText("DDDDD")
+        buf.setScrollRegion(1, 3)
+        buf.scrollUp(10) // region is only 3 rows
+        assertEquals("AAAAA", buf.getScreenLine(0)) // above region, unaffected
+        assertEquals("", buf.getScreenLine(1))
+        assertEquals("", buf.getScreenLine(2))
+        assertEquals("", buf.getScreenLine(3))
+    }
+
+    @Test
+    fun `scrollUp multiple lines`() {
+        val buf = TerminalBuffer(5, 5)
+        for (i in 0 until 5) {
+            buf.setCursorPosition(0, i)
+            buf.writeText("ROW$i")
+        }
+        buf.setScrollRegion(1, 4)
+        buf.scrollUp(2)
+        assertEquals("ROW0", buf.getScreenLine(0))  // above region
+        assertEquals("ROW3", buf.getScreenLine(1))   // was row 3
+        assertEquals("ROW4", buf.getScreenLine(2))   // was row 4
+        assertEquals("", buf.getScreenLine(3))        // new empty
+        assertEquals("", buf.getScreenLine(4))        // new empty
+    }
+
+    // --- scrollDown ---
+
+    @Test
+    fun `scrollDown 1 removes bottom of region and adds empty at top`() {
+        val buf = TerminalBuffer(5, 4)
+        buf.writeText("AAAAA")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("BBBBB")
+        buf.setCursorPosition(0, 2)
+        buf.writeText("CCCCC")
+        buf.setCursorPosition(0, 3)
+        buf.writeText("DDDDD")
+        buf.setScrollRegion(1, 3)
+        buf.scrollDown(1)
+        assertEquals("AAAAA", buf.getScreenLine(0))  // above region, unaffected
+        assertEquals("", buf.getScreenLine(1))        // new empty at top of region
+        assertEquals("BBBBB", buf.getScreenLine(2))   // was row 1
+        assertEquals("CCCCC", buf.getScreenLine(3))   // was row 2, "DDDDD" discarded
+    }
+
+    @Test
+    fun `scrollDown never pushes to scrollback`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.writeText("AAAAA")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("BBBBB")
+        buf.setCursorPosition(0, 2)
+        buf.writeText("CCCCC")
+        // Default region 0-2
+        buf.scrollDown(1)
+        assertEquals(0, buf.scrollbackSize)
+    }
+
+    @Test
+    fun `scrollDown does not move cursor`() {
+        val buf = TerminalBuffer(5, 4)
+        buf.setCursorPosition(3, 2)
+        buf.setScrollRegion(0, 3)
+        buf.setCursorPosition(3, 2) // re-set after setScrollRegion resets
+        buf.scrollDown(1)
+        assertEquals(3, buf.cursorCol)
+        assertEquals(2, buf.cursorRow)
+    }
+
+    @Test
+    fun `scrollDown n greater than region height clears the region`() {
+        val buf = TerminalBuffer(5, 4)
+        buf.writeText("AAAAA")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("BBBBB")
+        buf.setCursorPosition(0, 2)
+        buf.writeText("CCCCC")
+        buf.setCursorPosition(0, 3)
+        buf.writeText("DDDDD")
+        buf.setScrollRegion(1, 3)
+        buf.scrollDown(10)
+        assertEquals("AAAAA", buf.getScreenLine(0)) // above region, unaffected
+        assertEquals("", buf.getScreenLine(1))
+        assertEquals("", buf.getScreenLine(2))
+        assertEquals("", buf.getScreenLine(3))
+    }
+
+    @Test
+    fun `scrollDown multiple lines`() {
+        val buf = TerminalBuffer(5, 5)
+        for (i in 0 until 5) {
+            buf.setCursorPosition(0, i)
+            buf.writeText("ROW$i")
+        }
+        buf.setScrollRegion(1, 4)
+        buf.scrollDown(2)
+        assertEquals("ROW0", buf.getScreenLine(0))  // above region
+        assertEquals("", buf.getScreenLine(1))        // new empty
+        assertEquals("", buf.getScreenLine(2))        // new empty
+        assertEquals("ROW1", buf.getScreenLine(3))   // was row 1
+        assertEquals("ROW2", buf.getScreenLine(4))   // was row 2, ROW3 and ROW4 discarded
+    }
+
+    // --- Integration with resize and clear ---
+
+    @Test
+    fun `resize resets scroll region to full screen`() {
+        val buf = TerminalBuffer(10, 5)
+        buf.setScrollRegion(1, 3)
+        buf.resize(10, 8)
+        assertEquals(0, buf.scrollTop)
+        assertEquals(7, buf.scrollBottom)
+    }
+
+    @Test
+    fun `clearScreen resets scroll region to full screen`() {
+        val buf = TerminalBuffer(10, 5)
+        buf.setScrollRegion(1, 3)
+        buf.clearScreen()
+        assertEquals(0, buf.scrollTop)
+        assertEquals(4, buf.scrollBottom)
+    }
+
+    @Test
+    fun `clearAll resets scroll region to full screen`() {
+        val buf = TerminalBuffer(10, 5)
+        buf.setScrollRegion(1, 3)
+        buf.clearAll()
+        assertEquals(0, buf.scrollTop)
+        assertEquals(4, buf.scrollBottom)
+    }
+
+    // --- Edge cases ---
+
+    @Test
+    fun `scroll region of minimum size 2 rows`() {
+        val buf = TerminalBuffer(5, 5)
+        buf.setCursorPosition(0, 2)
+        buf.writeText("AAAAA")
+        buf.setCursorPosition(0, 3)
+        buf.writeText("BBBBB")
+        buf.setScrollRegion(2, 3) // 2-row region
+        buf.setCursorPosition(0, 3)
+        // Write enough to wrap and scroll within the tiny region
+        buf.writeText("CCCCCDDDDD")
+        assertEquals("", buf.getScreenLine(0))       // above region
+        assertEquals("", buf.getScreenLine(1))       // above region
+        assertEquals("CCCCC", buf.getScreenLine(2))  // "AAAAA" scrolled out, then "CCCCC" scrolled up
+        assertEquals("DDDDD", buf.getScreenLine(3))  // written on new empty line
+    }
+
+    @Test
+    fun `scroll region covering all but first row - status bar at top`() {
+        val buf = TerminalBuffer(5, 4)
+        buf.writeText("=STS=") // status bar on row 0
+        buf.setScrollRegion(1, 3)
+        buf.setCursorPosition(0, 1)
+        buf.writeText("AAAAABBBBBCCCCCDDDDD") // fills 4 lines, 3 fit in region
+        assertEquals("=STS=", buf.getScreenLine(0)) // status bar preserved
+    }
+
+    @Test
+    fun `scroll region covering all but last row - status bar at bottom`() {
+        val buf = TerminalBuffer(5, 4)
+        buf.setCursorPosition(0, 3)
+        buf.writeText("=STS=") // status bar on row 3
+        buf.setScrollRegion(0, 2)
+        buf.setCursorPosition(0, 0)
+        buf.writeText("AAAAABBBBBCCCCCDDDDD") // fills 4+ lines, 3 fit in region
+        assertEquals("=STS=", buf.getScreenLine(3)) // status bar preserved
+    }
+
+    @Test
+    fun `wide char wrapping at scrollBottom triggers region-aware scroll`() {
+        val buf = TerminalBuffer(5, 4)
+        buf.writeText("FIXED")
+        buf.setScrollRegion(1, 3)
+        buf.setCursorPosition(0, 1)
+        buf.writeText("AAAAA")
+        buf.setCursorPosition(0, 2)
+        buf.writeText("BBBBB")
+        buf.setCursorPosition(0, 3)
+        // Write 4 narrow chars + 1 wide char: "XXXX世"
+        // 4 chars fill cols 0-3, wide char needs 2 cols, only 1 left -> wraps
+        // Wrap triggers scroll within region since cursor is at scrollBottom
+        buf.writeText("XXXX\u4E16")
+        assertEquals("FIXED", buf.getScreenLine(0)) // above region, unaffected
+        assertEquals("BBBBB", buf.getScreenLine(1)) // "AAAAA" scrolled out
+        assertEquals("XXXX", buf.getScreenLine(2))   // moved up from row 3
+        assertEquals("\u4E16", buf.getScreenLine(3)) // wide char on new empty line
+    }
+
+    @Test
+    fun `multiple wraps within scroll region during single writeText`() {
+        val buf = TerminalBuffer(3, 5)
+        buf.writeText("TOP")
+        buf.setCursorPosition(0, 4)
+        buf.writeText("BOT")
+        buf.setScrollRegion(1, 3)
+        buf.setCursorPosition(0, 1)
+        // Write 4 lines of 3 chars into a 3-row region
+        buf.writeText("AAABBBCCCDDD")
+        assertEquals("TOP", buf.getScreenLine(0)) // above region
+        // Region scrolled: AAA was pushed out, BBB pushed out, CCC and DDD remain
+        assertEquals("BBB", buf.getScreenLine(1))
+        assertEquals("CCC", buf.getScreenLine(2))
+        assertEquals("DDD", buf.getScreenLine(3))
+        assertEquals("BOT", buf.getScreenLine(4)) // below region
+    }
+
+    @Test
+    fun `scrollUp rejects negative amount`() {
+        val buf = TerminalBuffer(5, 3)
+        assertFailsWith<IllegalArgumentException> { buf.scrollUp(-1) }
+    }
+
+    @Test
+    fun `scrollDown rejects negative amount`() {
+        val buf = TerminalBuffer(5, 3)
+        assertFailsWith<IllegalArgumentException> { buf.scrollDown(-1) }
+    }
+
+    @Test
+    fun `scrollUp 0 does nothing`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.writeText("AAAAA")
+        buf.scrollUp(0)
+        assertEquals("AAAAA", buf.getScreenLine(0))
+        assertEquals(0, buf.scrollbackSize)
+    }
+
+    @Test
+    fun `scrollDown 0 does nothing`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.writeText("AAAAA")
+        buf.scrollDown(0)
+        assertEquals("AAAAA", buf.getScreenLine(0))
+    }
 }
