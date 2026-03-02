@@ -5,6 +5,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotSame
 import kotlin.test.assertTrue
+import kotlin.test.assertFalse
 
 class TerminalLineTest {
 
@@ -911,5 +912,147 @@ class TerminalLineTest {
         assertEquals(2, line.getCell(2).width)
         assertTrue(line.getCell(3).isContinuation)
         assertEquals('B', line.getCell(4).character)
+    }
+
+    // --- Dirty tracking ---
+
+    @Test
+    fun `new line starts dirty`() {
+        val line = TerminalLine(10)
+        assertTrue(line.dirty)
+    }
+
+    @Test
+    fun `markClean sets dirty to false`() {
+        val line = TerminalLine(10)
+        line.markClean()
+        assertFalse(line.dirty)
+    }
+
+    @Test
+    fun `setCell marks line dirty`() {
+        val line = TerminalLine(10)
+        line.markClean()
+        line.setCell(0, Cell(character = 'A', attributes = defaultAttrs))
+        assertTrue(line.dirty)
+    }
+
+    @Test
+    fun `writeText marks line dirty`() {
+        val line = TerminalLine(10)
+        line.markClean()
+        line.writeText(0, "Hello", defaultAttrs)
+        assertTrue(line.dirty)
+    }
+
+    @Test
+    fun `insertText marks line dirty`() {
+        val line = TerminalLine(10)
+        line.markClean()
+        line.insertText(0, "Hello", defaultAttrs)
+        assertTrue(line.dirty)
+    }
+
+    @Test
+    fun `fill marks line dirty`() {
+        val line = TerminalLine(10)
+        line.markClean()
+        line.fill('X', defaultAttrs)
+        assertTrue(line.dirty)
+    }
+
+    @Test
+    fun `clear marks line dirty`() {
+        val line = TerminalLine(10)
+        line.markClean()
+        line.clear()
+        assertTrue(line.dirty)
+    }
+
+    @Test
+    fun `deleteChars marks line dirty`() {
+        val line = TerminalLine(10)
+        line.writeText(0, "Hello", defaultAttrs)
+        line.markClean()
+        line.deleteChars(0, 2)
+        assertTrue(line.dirty)
+    }
+
+    @Test
+    fun `insertBlanks marks line dirty`() {
+        val line = TerminalLine(10)
+        line.writeText(0, "Hello", defaultAttrs)
+        line.markClean()
+        line.insertBlanks(0, 2)
+        assertTrue(line.dirty)
+    }
+
+    @Test
+    fun `deleteChars with n=0 does not mark line dirty`() {
+        val line = TerminalLine(10)
+        line.markClean()
+        line.deleteChars(0, 0)
+        assertFalse(line.dirty)
+    }
+
+    @Test
+    fun `insertBlanks with n=0 does not mark line dirty`() {
+        val line = TerminalLine(10)
+        line.markClean()
+        line.insertBlanks(0, 0)
+        assertFalse(line.dirty)
+    }
+
+    @Test
+    fun `deleteChars with startCol out of range does not mark line dirty`() {
+        val line = TerminalLine(10)
+        line.markClean()
+        line.deleteChars(10, 1)
+        assertFalse(line.dirty)
+    }
+
+    @Test
+    fun `insertBlanks with startCol out of range does not mark line dirty`() {
+        val line = TerminalLine(10)
+        line.markClean()
+        line.insertBlanks(10, 1)
+        assertFalse(line.dirty)
+    }
+
+    @Test
+    fun `read methods do not set dirty`() {
+        val line = TerminalLine(10)
+        line.writeText(0, "Hello", defaultAttrs)
+        line.markClean()
+        line.getCell(0)
+        line.getText()
+        line.getCells()
+        assertFalse(line.dirty)
+    }
+
+    @Test
+    fun `setting wrappedFromPrevious does not set dirty`() {
+        val line = TerminalLine(10)
+        line.markClean()
+        line.wrappedFromPrevious = true
+        assertFalse(line.dirty)
+    }
+
+    @Test
+    fun `copy creates a dirty line`() {
+        val line = TerminalLine(10)
+        line.writeText(0, "Hello", defaultAttrs)
+        line.markClean()
+        val copied = line.copy()
+        assertTrue(copied.dirty)
+    }
+
+    @Test
+    fun `copyWithWidth creates a dirty line`() {
+        val line = TerminalLine(10)
+        line.writeText(0, "Hello", defaultAttrs)
+        line.markClean()
+        val copied = line.copyWithWidth(20)
+        assertTrue(copied.dirty)
     }
 }
