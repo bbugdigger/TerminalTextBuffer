@@ -3,6 +3,8 @@ package terminal
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
+import kotlin.test.assertFalse
 
 class TerminalBufferTest {
 
@@ -1967,5 +1969,175 @@ class TerminalBufferTest {
             }
         }
         assertEquals("ABC  FGHIJ", content)
+    }
+
+    // --- Dirty tracking ---
+
+    @Test
+    fun `all screen lines start dirty`() {
+        val buf = TerminalBuffer(10, 3)
+        for (row in 0 until 3) {
+            assertTrue(buf.isLineDirty(row))
+        }
+    }
+
+    @Test
+    fun `clearDirtyFlags marks all screen lines clean`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.clearDirtyFlags()
+        for (row in 0 until 3) {
+            assertFalse(buf.isLineDirty(row))
+        }
+    }
+
+    @Test
+    fun `writeText marks affected line dirty`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.clearDirtyFlags()
+        buf.writeText("Hello")
+        assertTrue(buf.isLineDirty(0))
+        assertFalse(buf.isLineDirty(1))
+        assertFalse(buf.isLineDirty(2))
+    }
+
+    @Test
+    fun `writeText wrapping marks multiple lines dirty`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.clearDirtyFlags()
+        buf.writeText("HelloWorld")
+        assertTrue(buf.isLineDirty(0))
+        assertTrue(buf.isLineDirty(1))
+        assertFalse(buf.isLineDirty(2))
+    }
+
+    @Test
+    fun `clearScreen marks all lines dirty`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.clearDirtyFlags()
+        buf.clearScreen()
+        for (row in 0 until 3) {
+            assertTrue(buf.isLineDirty(row))
+        }
+    }
+
+    @Test
+    fun `isLineDirty returns false after clearDirtyFlags when no changes occur`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello")
+        buf.clearDirtyFlags()
+        // No further changes
+        for (row in 0 until 3) {
+            assertFalse(buf.isLineDirty(row))
+        }
+    }
+
+    @Test
+    fun `resize makes all screen lines dirty`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello")
+        buf.clearDirtyFlags()
+        buf.resize(20, 5)
+        for (row in 0 until 5) {
+            assertTrue(buf.isLineDirty(row))
+        }
+    }
+
+    @Test
+    fun `fillLine marks affected line dirty`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.clearDirtyFlags()
+        buf.setCursorPosition(0, 1)
+        buf.fillLine('X')
+        assertFalse(buf.isLineDirty(0))
+        assertTrue(buf.isLineDirty(1))
+        assertFalse(buf.isLineDirty(2))
+    }
+
+    @Test
+    fun `deleteChars marks affected line dirty`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello")
+        buf.clearDirtyFlags()
+        buf.setCursorPosition(0, 0)
+        buf.deleteChars(2)
+        assertTrue(buf.isLineDirty(0))
+        assertFalse(buf.isLineDirty(1))
+    }
+
+    @Test
+    fun `insertBlanks marks affected line dirty`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello")
+        buf.clearDirtyFlags()
+        buf.setCursorPosition(0, 0)
+        buf.insertBlanks(2)
+        assertTrue(buf.isLineDirty(0))
+        assertFalse(buf.isLineDirty(1))
+    }
+
+    @Test
+    fun `scrollUp introduces dirty line at bottom of region`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Line1")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("Line2")
+        buf.setCursorPosition(0, 2)
+        buf.writeText("Line3")
+        buf.clearDirtyFlags()
+        buf.scrollUp(1)
+        // Line shifted from row 1 to row 0 — same object, still clean
+        assertFalse(buf.isLineDirty(0))
+        // Line shifted from row 2 to row 1 — same object, still clean
+        assertFalse(buf.isLineDirty(1))
+        // New empty line inserted at bottom — dirty
+        assertTrue(buf.isLineDirty(2))
+    }
+
+    @Test
+    fun `scrollDown introduces dirty line at top of region`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Line1")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("Line2")
+        buf.setCursorPosition(0, 2)
+        buf.writeText("Line3")
+        buf.clearDirtyFlags()
+        buf.scrollDown(1)
+        // New empty line inserted at top — dirty
+        assertTrue(buf.isLineDirty(0))
+        // Line shifted from row 0 to row 1 — same object, still clean
+        assertFalse(buf.isLineDirty(1))
+        // Line shifted from row 1 to row 2 — same object, still clean
+        assertFalse(buf.isLineDirty(2))
+    }
+
+    @Test
+    fun `isLineDirty throws on invalid screen row`() {
+        val buf = TerminalBuffer(10, 3)
+        assertFailsWith<IndexOutOfBoundsException> { buf.isLineDirty(-1) }
+        assertFailsWith<IndexOutOfBoundsException> { buf.isLineDirty(3) }
+    }
+
+    @Test
+    fun `cursor movement does not mark lines dirty`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.clearDirtyFlags()
+        buf.setCursorPosition(5, 1)
+        buf.moveCursorUp()
+        buf.moveCursorDown()
+        buf.moveCursorLeft()
+        buf.moveCursorRight()
+        for (row in 0 until 3) {
+            assertFalse(buf.isLineDirty(row))
+        }
+    }
+
+    @Test
+    fun `insertEmptyLineAtBottom introduces dirty line`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.clearDirtyFlags()
+        buf.insertEmptyLineAtBottom()
+        // The new line at the bottom is dirty
+        assertTrue(buf.isLineDirty(2))
     }
 }
