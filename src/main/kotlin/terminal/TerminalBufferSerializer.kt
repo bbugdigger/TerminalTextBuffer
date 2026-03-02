@@ -1,0 +1,4 @@
+package terminal
+
+object TerminalBufferSerializer {
+}
