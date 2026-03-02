@@ -319,6 +319,28 @@ class TerminalLine(val width: Int) {
      */
     fun getCells(): List<Cell> = cells.toList()
 
+    companion object {
+        /**
+         * Creates a [TerminalLine] from a pre-built list of cells.
+         *
+         * The line width is inferred from the size of the [cells] list.
+         * This is used by deserialization to reconstruct lines from saved state.
+         *
+         * @param cells The cells to populate the line with. Must not be empty.
+         * @param wrappedFromPrevious Whether this line is a soft-wrap continuation of the previous line.
+         * @return A new [TerminalLine] with the given cells and wrap flag.
+         */
+        fun fromCells(cells: List<Cell>, wrappedFromPrevious: Boolean = false): TerminalLine {
+            require(cells.isNotEmpty()) { "Cell list must not be empty" }
+            val line = TerminalLine(cells.size)
+            for (i in cells.indices) {
+                line.cells[i] = cells[i]
+            }
+            line.wrappedFromPrevious = wrappedFromPrevious
+            return line
+        }
+    }
+
     // --- Private helpers ---
 
     /**

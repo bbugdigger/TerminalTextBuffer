@@ -909,6 +909,22 @@ class TerminalBuffer(
         get() = scrollback.size + height
 
     /**
+     * Returns a read-only view of the screen lines.
+     *
+     * This is primarily intended for serialization. The returned list is a snapshot;
+     * modifying the buffer after calling this method does not affect the returned list.
+     */
+    fun getScreenLines(): List<TerminalLine> = screen.toList()
+
+    /**
+     * Returns a read-only view of the scrollback lines.
+     *
+     * This is primarily intended for serialization. The returned list is a snapshot;
+     * modifying the buffer after calling this method does not affect the returned list.
+     */
+    fun getScrollbackLines(): List<TerminalLine> = scrollback.toList()
+
+    /**
      * Returns the character at the given absolute position.
      *
      * Absolute row 0 is the oldest scrollback line. Row [scrollbackSize] is the first screen line.
@@ -1089,6 +1105,60 @@ class TerminalBuffer(
             throw IndexOutOfBoundsException(
                 "Screen row $screenRow is out of bounds for screen height $height"
             )
+        }
+    }
+
+    companion object {
+        /**
+         * Creates a [TerminalBuffer] from pre-built state, used for deserialization.
+         *
+         * The screen and scrollback lines are installed directly into the buffer.
+         * The scroll region is reset to the full screen. The selection is cleared.
+         * All lines start with their default dirty state (true for newly created lines).
+         *
+         * @param width The buffer width (columns). Must be positive.
+         * @param height The buffer height (rows). Must be positive.
+         * @param maxScrollbackSize Maximum scrollback lines. Must be non-negative.
+         * @param cursorCol The cursor column, clamped to [0, width - 1].
+         * @param cursorRow The cursor row (screen-relative), clamped to [0, height - 1].
+         * @param currentAttributes The current text attributes.
+         * @param screenLines The screen lines. Must have exactly [height] elements.
+         * @param scrollbackLines The scrollback lines.
+         * @throws IllegalArgumentException if dimensions are invalid or screenLines size != height.
+         */
+        fun fromState(
+            width: Int,
+            height: Int,
+            maxScrollbackSize: Int,
+            cursorCol: Int,
+            cursorRow: Int,
+            currentAttributes: CellAttributes,
+            screenLines: List<TerminalLine>,
+            scrollbackLines: List<TerminalLine>,
+        ): TerminalBuffer {
+            require(screenLines.size == height) {
+                "screenLines size (${screenLines.size}) must equal height ($height)"
+            }
+            val buffer = TerminalBuffer(width, height, maxScrollbackSize)
+            // Replace the default screen lines with the provided ones
+            buffer.screen.clear()
+            buffer.screen.addAll(screenLines)
+            // Load scrollback
+            buffer.scrollback.clear()
+            for (line in scrollbackLines) {
+                buffer.scrollback.addLast(line)
+            }
+            // Trim scrollback to max size
+            while (buffer.scrollback.size > maxScrollbackSize) {
+                buffer.scrollback.removeFirst()
+            }
+            // Restore cursor and attributes
+            buffer.cursorCol = cursorCol.coerceIn(0, width - 1)
+            buffer.cursorRow = cursorRow.coerceIn(0, height - 1)
+            buffer.currentAttributes = currentAttributes
+            // Scroll region and selection are reset to defaults
+            // (scrollTop=0, scrollBottom=height-1 are already set by constructor)
+            return buffer
         }
     }
 }
