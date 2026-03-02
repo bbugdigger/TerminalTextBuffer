@@ -752,6 +752,38 @@ class TerminalBuffer(
         return lines.joinToString("\n")
     }
 
+    // --- Dirty tracking ---
+
+    /**
+     * Returns whether the screen line at the given row has been modified since it was
+     * last marked clean.
+     *
+     * This is intended for use by a rendering layer: only dirty lines need to be redrawn.
+     *
+     * @param screenRow Row index relative to the screen (0 = top of screen).
+     * @throws IndexOutOfBoundsException if [screenRow] is out of bounds.
+     */
+    fun isLineDirty(screenRow: Int): Boolean {
+        requireValidScreenRow(screenRow)
+        return screen[screenRow].dirty
+    }
+
+    /**
+     * Marks all screen lines as clean (not dirty).
+     *
+     * A rendering layer should call this after drawing the entire screen, so that
+     * subsequent queries via [isLineDirty] only report lines that changed since
+     * the last render pass.
+     *
+     * Only screen lines are affected — scrollback lines are not touched, since they
+     * are not part of the visible display.
+     */
+    fun clearDirtyFlags() {
+        for (line in screen) {
+            line.markClean()
+        }
+    }
+
     // --- Internal helpers ---
 
     /**
