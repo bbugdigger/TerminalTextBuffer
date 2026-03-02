@@ -5,6 +5,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 
 class TerminalBufferTest {
 
@@ -2551,5 +2553,532 @@ class TerminalBufferTest {
         buf.insertEmptyLineAtBottom()
         // The new line at the bottom is dirty
         assertTrue(buf.isLineDirty(2))
+    }
+
+    // --- Selection: setSelection ---
+
+    @Test
+    fun `setSelection creates a selection range`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello")
+        buf.setSelection(buf.scrollbackSize, 0, buf.scrollbackSize, 5)
+        assertTrue(buf.hasSelection())
+        val sel = buf.selection
+        assertNotNull(sel)
+        assertEquals(buf.scrollbackSize, sel.startRow)
+        assertEquals(0, sel.startCol)
+        assertEquals(buf.scrollbackSize, sel.endRow)
+        assertEquals(5, sel.endCol)
+    }
+
+    @Test
+    fun `setSelection normalizes reversed order`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello")
+        // Set end before start — should be normalized
+        buf.setSelection(buf.scrollbackSize, 5, buf.scrollbackSize, 0)
+        val sel = buf.selection
+        assertNotNull(sel)
+        assertEquals(0, sel.startCol)
+        assertEquals(5, sel.endCol)
+    }
+
+    @Test
+    fun `setSelection normalizes reversed rows`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Line1")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("Line2")
+        val row0 = buf.scrollbackSize
+        val row1 = buf.scrollbackSize + 1
+        // Set end row before start row
+        buf.setSelection(row1, 2, row0, 3)
+        val sel = buf.selection
+        assertNotNull(sel)
+        assertEquals(row0, sel.startRow)
+        assertEquals(3, sel.startCol)
+        assertEquals(row1, sel.endRow)
+        assertEquals(2, sel.endCol)
+    }
+
+    @Test
+    fun `setSelection clamps columns to buffer width`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.setSelection(buf.scrollbackSize, -5, buf.scrollbackSize, 100)
+        val sel = buf.selection
+        assertNotNull(sel)
+        assertEquals(0, sel.startCol)
+        assertEquals(10, sel.endCol)
+    }
+
+    @Test
+    fun `setSelection clamps rows to buffer bounds`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.setSelection(-10, 0, 100, 5)
+        val sel = buf.selection
+        assertNotNull(sel)
+        assertEquals(0, sel.startRow)
+        assertEquals(buf.totalLineCount - 1, sel.endRow)
+    }
+
+    @Test
+    fun `setSelection with empty range clears selection`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.setSelection(buf.scrollbackSize, 3, buf.scrollbackSize, 3)
+        assertFalse(buf.hasSelection())
+        assertNull(buf.selection)
+    }
+
+    @Test
+    fun `clearSelection clears an active selection`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.setSelection(buf.scrollbackSize, 0, buf.scrollbackSize, 5)
+        assertTrue(buf.hasSelection())
+        buf.clearSelection()
+        assertFalse(buf.hasSelection())
+        assertNull(buf.selection)
+    }
+
+    @Test
+    fun `clearSelection on no selection is a no-op`() {
+        val buf = TerminalBuffer(10, 3)
+        assertFalse(buf.hasSelection())
+        buf.clearSelection()
+        assertFalse(buf.hasSelection())
+    }
+
+    @Test
+    fun `setSelection snaps start on continuation cell to main cell`() {
+        val buf = TerminalBuffer(10, 3)
+        // Write a wide character at column 0 (occupies cols 0-1)
+        buf.writeText("\u4e16") // 世 — wide char
+        // Try to select starting at column 1 (the continuation cell)
+        buf.setSelection(buf.scrollbackSize, 1, buf.scrollbackSize, 5)
+        val sel = buf.selection
+        assertNotNull(sel)
+        assertEquals(0, sel.startCol) // Snapped left to include the main cell
+    }
+
+    @Test
+    fun `setSelection snaps end to include continuation of wide char`() {
+        val buf = TerminalBuffer(10, 3)
+        // Write text then a wide char: "A世"
+        // A at col 0, 世 at cols 1-2
+        buf.writeText("A\u4e16")
+        // Select cols [0, 2) — endCol=2 means last included is col 1 (main cell of 世)
+        buf.setSelection(buf.scrollbackSize, 0, buf.scrollbackSize, 2)
+        val sel = buf.selection
+        assertNotNull(sel)
+        assertEquals(3, sel.endCol) // Snapped right to include continuation at col 2
+    }
+
+    @Test
+    fun `setSelection does not snap when start is on main cell`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("\u4e16") // 世 at cols 0-1
+        buf.setSelection(buf.scrollbackSize, 0, buf.scrollbackSize, 5)
+        val sel = buf.selection
+        assertNotNull(sel)
+        assertEquals(0, sel.startCol) // Already on main cell, no snapping
+    }
+
+    @Test
+    fun `setSelection does not snap end when last included is not wide`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello")
+        buf.setSelection(buf.scrollbackSize, 0, buf.scrollbackSize, 3)
+        val sel = buf.selection
+        assertNotNull(sel)
+        assertEquals(3, sel.endCol) // No snapping needed
+    }
+
+    @Test
+    fun `setSelection can span scrollback and screen`() {
+        val buf = TerminalBuffer(10, 2, maxScrollbackSize = 10)
+        // Fill screen and push lines to scrollback
+        buf.writeText("Line1")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("Line2")
+        buf.insertEmptyLineAtBottom() // pushes Line1 to scrollback
+        buf.setCursorPosition(0, 1)
+        buf.writeText("Line3")
+        // Now: scrollback has "Line1", screen has "Line2", "Line3"
+        assertEquals(1, buf.scrollbackSize)
+        buf.setSelection(0, 0, 2, 5)
+        val sel = buf.selection
+        assertNotNull(sel)
+        assertEquals(0, sel.startRow)
+        assertEquals(2, sel.endRow)
+    }
+
+    // --- Selection: isSelected ---
+
+    @Test
+    fun `isSelected returns false with no selection`() {
+        val buf = TerminalBuffer(10, 3)
+        assertFalse(buf.isSelected(buf.scrollbackSize, 0))
+    }
+
+    @Test
+    fun `isSelected single-line selection`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello World")
+        val row = buf.scrollbackSize
+        buf.setSelection(row, 2, row, 7)
+        // Before selection
+        assertFalse(buf.isSelected(row, 0))
+        assertFalse(buf.isSelected(row, 1))
+        // Inside selection [2, 7)
+        assertTrue(buf.isSelected(row, 2))
+        assertTrue(buf.isSelected(row, 3))
+        assertTrue(buf.isSelected(row, 6))
+        // After selection
+        assertFalse(buf.isSelected(row, 7))
+        assertFalse(buf.isSelected(row, 9))
+    }
+
+    @Test
+    fun `isSelected multi-line selection`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("AAAAAAAAAA")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("BBBBBBBBBB")
+        buf.setCursorPosition(0, 2)
+        buf.writeText("CCCCCCCCCC")
+        val row0 = buf.scrollbackSize
+        val row1 = row0 + 1
+        val row2 = row0 + 2
+        buf.setSelection(row0, 5, row2, 3)
+        // Row 0: col >= 5 is selected
+        assertFalse(buf.isSelected(row0, 4))
+        assertTrue(buf.isSelected(row0, 5))
+        assertTrue(buf.isSelected(row0, 9))
+        // Row 1: all columns selected (middle row)
+        assertTrue(buf.isSelected(row1, 0))
+        assertTrue(buf.isSelected(row1, 9))
+        // Row 2: col < 3 is selected
+        assertTrue(buf.isSelected(row2, 0))
+        assertTrue(buf.isSelected(row2, 2))
+        assertFalse(buf.isSelected(row2, 3))
+        assertFalse(buf.isSelected(row2, 9))
+    }
+
+    @Test
+    fun `isSelected row outside range returns false`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello")
+        val row = buf.scrollbackSize
+        buf.setSelection(row, 0, row, 5)
+        assertFalse(buf.isSelected(row + 1, 0))
+        assertFalse(buf.isSelected(row + 2, 0))
+    }
+
+    // --- Selection: getSelectedText ---
+
+    @Test
+    fun `getSelectedText returns null with no selection`() {
+        val buf = TerminalBuffer(10, 3)
+        assertNull(buf.getSelectedText())
+    }
+
+    @Test
+    fun `getSelectedText single line`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello World")
+        val row = buf.scrollbackSize
+        // "Hello Worl" on row 0 (10 cols), "d" wraps to row 1
+        buf.setSelection(row, 0, row, 5)
+        assertEquals("Hello", buf.getSelectedText())
+    }
+
+    @Test
+    fun `getSelectedText single line middle portion`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("ABCDEFGHIJ")
+        val row = buf.scrollbackSize
+        buf.setSelection(row, 2, row, 6)
+        assertEquals("CDEF", buf.getSelectedText())
+    }
+
+    @Test
+    fun `getSelectedText multi-line with hard breaks`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("World")
+        val row0 = buf.scrollbackSize
+        val row1 = row0 + 1
+        buf.setSelection(row0, 0, row1, 5)
+        assertEquals("Hello\nWorld", buf.getSelectedText())
+    }
+
+    @Test
+    fun `getSelectedText joins soft-wrapped lines`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.writeText("HelloWorld")
+        // "Hello" on row 0, "World" on row 1 (soft-wrapped)
+        val row0 = buf.scrollbackSize
+        val row1 = row0 + 1
+        buf.setSelection(row0, 0, row1, 5)
+        assertEquals("HelloWorld", buf.getSelectedText())
+    }
+
+    @Test
+    fun `getSelectedText trims trailing spaces`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hi")
+        val row = buf.scrollbackSize
+        buf.setSelection(row, 0, row, 10)
+        // "Hi" followed by 8 spaces — trailing spaces should be trimmed
+        assertEquals("Hi", buf.getSelectedText())
+    }
+
+    @Test
+    fun `getSelectedText preserves trailing spaces on soft-wrapped continuation`() {
+        val buf = TerminalBuffer(5, 3)
+        // Write "AB   CD" — 5 chars "AB   " fill row 0, then "CD" on row 1 (soft-wrapped)
+        buf.writeText("AB   CD")
+        val row0 = buf.scrollbackSize
+        val row1 = row0 + 1
+        buf.setSelection(row0, 0, row1, 2)
+        // Row 0 has "AB   " and continues to soft-wrapped row 1 — trailing spaces preserved
+        assertEquals("AB   CD", buf.getSelectedText())
+    }
+
+    @Test
+    fun `getSelectedText with wide characters`() {
+        val buf = TerminalBuffer(10, 3)
+        // 世界 = two wide chars, occupying 4 columns
+        buf.writeText("\u4e16\u754c")
+        val row = buf.scrollbackSize
+        buf.setSelection(row, 0, row, 4)
+        assertEquals("\u4e16\u754c", buf.getSelectedText())
+    }
+
+    @Test
+    fun `getSelectedText with snapped wide char at start`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("A\u4e16B") // A at 0, 世 at 1-2(continuation), B at 3
+        val row = buf.scrollbackSize
+        // Select starting at col 2 (continuation cell of 世) — snaps to col 1
+        buf.setSelection(row, 2, row, 4)
+        assertEquals("\u4e16B", buf.getSelectedText())
+    }
+
+    @Test
+    fun `getSelectedText with snapped wide char at end`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("A\u4e16B") // A at 0, 世 at 1-2, B at 3
+        val row = buf.scrollbackSize
+        // Select [0, 2) — last included is col 1 (wide char main cell) — snaps end to 3
+        buf.setSelection(row, 0, row, 2)
+        assertEquals("A\u4e16", buf.getSelectedText())
+    }
+
+    @Test
+    fun `getSelectedText from scrollback`() {
+        val buf = TerminalBuffer(10, 2, maxScrollbackSize = 10)
+        buf.writeText("OldLine")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("NewLine1")
+        buf.insertEmptyLineAtBottom()
+        buf.setCursorPosition(0, 1)
+        buf.writeText("NewLine2")
+        // scrollback: "OldLine", screen: "NewLine1", "NewLine2"
+        assertEquals(1, buf.scrollbackSize)
+        buf.setSelection(0, 0, 0, 7)
+        assertEquals("OldLine", buf.getSelectedText())
+    }
+
+    @Test
+    fun `getSelectedText spanning scrollback and screen`() {
+        val buf = TerminalBuffer(10, 2, maxScrollbackSize = 10)
+        buf.writeText("OldLine")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("NewLine1")
+        buf.insertEmptyLineAtBottom()
+        buf.setCursorPosition(0, 1)
+        buf.writeText("NewLine2")
+        // scrollback: "OldLine", screen: "NewLine1", "NewLine2"
+        buf.setSelection(0, 0, 2, 8)
+        assertEquals("OldLine\nNewLine1\nNewLine2", buf.getSelectedText())
+    }
+
+    @Test
+    fun `getSelectedText mixed soft and hard wraps`() {
+        val buf = TerminalBuffer(5, 4)
+        // Write "HelloWorld" (soft wraps) then position to line 2 for hard break
+        buf.writeText("HelloWorld")
+        // Row 0: "Hello", Row 1: "World" (soft-wrapped)
+        buf.setCursorPosition(0, 2)
+        buf.writeText("New")
+        // Row 2: "New" (hard break — not wrapped from previous)
+        val row0 = buf.scrollbackSize
+        val row2 = row0 + 2
+        buf.setSelection(row0, 0, row2, 3)
+        assertEquals("HelloWorld\nNew", buf.getSelectedText())
+    }
+
+    @Test
+    fun `getSelectedText empty line between content`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("First")
+        // Row 1 is empty (hard break)
+        buf.setCursorPosition(0, 2)
+        buf.writeText("Third")
+        val row0 = buf.scrollbackSize
+        val row2 = row0 + 2
+        buf.setSelection(row0, 0, row2, 5)
+        assertEquals("First\n\nThird", buf.getSelectedText())
+    }
+
+    @Test
+    fun `getSelectedText partial first and last line`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("ABCDEFGHIJ")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("KLMNOPQRST")
+        val row0 = buf.scrollbackSize
+        val row1 = row0 + 1
+        buf.setSelection(row0, 3, row1, 7)
+        assertEquals("DEFGHIJ\nKLMNOPQ", buf.getSelectedText())
+    }
+
+    // --- Selection: auto-clear on mutation ---
+
+    @Test
+    fun `writeText clears selection`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello")
+        buf.setSelection(buf.scrollbackSize, 0, buf.scrollbackSize, 5)
+        assertTrue(buf.hasSelection())
+        buf.setCursorPosition(0, 1)
+        buf.writeText("X")
+        assertFalse(buf.hasSelection())
+    }
+
+    @Test
+    fun `insertText clears selection`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello")
+        buf.setSelection(buf.scrollbackSize, 0, buf.scrollbackSize, 5)
+        assertTrue(buf.hasSelection())
+        buf.setCursorPosition(0, 1)
+        buf.insertText("X")
+        assertFalse(buf.hasSelection())
+    }
+
+    @Test
+    fun `deleteChars clears selection`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello")
+        buf.setSelection(buf.scrollbackSize, 0, buf.scrollbackSize, 5)
+        buf.setCursorPosition(0, 0)
+        buf.deleteChars(1)
+        assertFalse(buf.hasSelection())
+    }
+
+    @Test
+    fun `insertBlanks clears selection`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello")
+        buf.setSelection(buf.scrollbackSize, 0, buf.scrollbackSize, 5)
+        buf.setCursorPosition(0, 0)
+        buf.insertBlanks(1)
+        assertFalse(buf.hasSelection())
+    }
+
+    @Test
+    fun `fillLine clears selection`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello")
+        buf.setSelection(buf.scrollbackSize, 0, buf.scrollbackSize, 5)
+        buf.fillLine('X')
+        assertFalse(buf.hasSelection())
+    }
+
+    @Test
+    fun `scrollUp clears selection`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello")
+        buf.setSelection(buf.scrollbackSize, 0, buf.scrollbackSize, 5)
+        buf.scrollUp(1)
+        assertFalse(buf.hasSelection())
+    }
+
+    @Test
+    fun `scrollDown clears selection`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello")
+        buf.setSelection(buf.scrollbackSize, 0, buf.scrollbackSize, 5)
+        buf.scrollDown(1)
+        assertFalse(buf.hasSelection())
+    }
+
+    @Test
+    fun `insertEmptyLineAtBottom clears selection`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello")
+        buf.setSelection(buf.scrollbackSize, 0, buf.scrollbackSize, 5)
+        buf.insertEmptyLineAtBottom()
+        assertFalse(buf.hasSelection())
+    }
+
+    @Test
+    fun `clearScreen clears selection`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello")
+        buf.setSelection(buf.scrollbackSize, 0, buf.scrollbackSize, 5)
+        buf.clearScreen()
+        assertFalse(buf.hasSelection())
+    }
+
+    @Test
+    fun `clearAll clears selection`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello")
+        buf.setSelection(buf.scrollbackSize, 0, buf.scrollbackSize, 5)
+        buf.clearAll()
+        assertFalse(buf.hasSelection())
+    }
+
+    @Test
+    fun `resize clears selection`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello")
+        buf.setSelection(buf.scrollbackSize, 0, buf.scrollbackSize, 5)
+        buf.resize(20, 5)
+        assertFalse(buf.hasSelection())
+    }
+
+    @Test
+    fun `cursor movement does not clear selection`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello")
+        buf.setSelection(buf.scrollbackSize, 0, buf.scrollbackSize, 5)
+        buf.setCursorPosition(5, 1)
+        buf.moveCursorUp()
+        buf.moveCursorDown()
+        buf.moveCursorLeft()
+        buf.moveCursorRight()
+        assertTrue(buf.hasSelection())
+    }
+
+    @Test
+    fun `setCurrentAttributes does not clear selection`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello")
+        buf.setSelection(buf.scrollbackSize, 0, buf.scrollbackSize, 5)
+        buf.setCurrentAttributes(CellAttributes(foreground = TerminalColor.RED))
+        assertTrue(buf.hasSelection())
+    }
+
+    @Test
+    fun `setScrollRegion does not clear selection`() {
+        val buf = TerminalBuffer(10, 5)
+        buf.writeText("Hello")
+        buf.setSelection(buf.scrollbackSize, 0, buf.scrollbackSize, 5)
+        buf.setScrollRegion(1, 3)
+        assertTrue(buf.hasSelection())
     }
 }
