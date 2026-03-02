@@ -1018,12 +1018,15 @@ class TerminalBufferTest {
     }
 
     @Test
-    fun `resize to narrower width truncates content`() {
+    fun `resize to narrower width reflows content`() {
         val buf = TerminalBuffer(10, 3)
         buf.writeText("HelloWorld")
         buf.resize(5, 3)
         assertEquals(5, buf.width)
+        // With reflow: "HelloWorld" → "Hello" + "World" (2 lines), fits in 3-row screen
         assertEquals("Hello", buf.getScreenLine(0))
+        assertEquals("World", buf.getScreenLine(1))
+        assertEquals("", buf.getScreenLine(2))
     }
 
     @Test
@@ -1162,10 +1165,13 @@ class TerminalBufferTest {
         buf.resize(5, 2)
         assertEquals(5, buf.width)
         assertEquals(2, buf.height)
-        // Top 2 rows moved to scrollback, bottom 2 remain on screen
+        // With reflow: "HelloWorld" → "Hello" + "World", "FooBar" → "FooBa" + "r"
+        // That's 4 physical lines for a 2-row screen → 2 go to scrollback
         assertEquals(2, buf.scrollbackSize)
-        assertEquals("Hello", buf.getLine(0))  // truncated from "HelloWorld"
-        assertEquals("FooBa", buf.getLine(1))  // truncated from "FooBar"
+        assertEquals("Hello", buf.getLine(0))  // reflowed from "HelloWorld"
+        assertEquals("World", buf.getLine(1))  // reflowed continuation
+        assertEquals("FooBa", buf.getScreenLine(0))  // reflowed from "FooBar"
+        assertEquals("r", buf.getScreenLine(1))       // reflowed continuation
     }
 
     // --- Resize: edge cases ---
@@ -1245,10 +1251,10 @@ class TerminalBufferTest {
         buf.resize(10, 5)
         assertEquals("Hello", buf.getScreenLine(0))
         buf.resize(5, 3)
-        // When shrinking from 5 to 3 rows, top 2 lines move to scrollback.
-        // "Hello" was on row 0, so it goes to scrollback along with row 1 (empty).
-        assertEquals(2, buf.scrollbackSize)
-        assertEquals("Hello", buf.getLine(0)) // "Hello" in scrollback
+        // With reflow: "Hello" fits on one line at width 5, empty trailing lines are trimmed.
+        // No content needs to go to scrollback.
+        assertEquals(0, buf.scrollbackSize)
+        assertEquals("Hello", buf.getScreenLine(0))
     }
 
     @Test
@@ -1269,6 +1275,412 @@ class TerminalBufferTest {
         assertEquals("AAAAA", buf.getScreenLine(0))
         assertEquals("BBBBB", buf.getScreenLine(1))
         assertEquals("CCCCC", buf.getScreenLine(2))
+    }
+
+    // ===== Content reflow tests =====
+
+    // --- wrappedFromPrevious flag tracking ---
+
+    @Test
+    fun `writeText sets wrappedFromPrevious on soft-wrapped lines`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.writeText("HelloWorld")
+        // "Hello" on row 0, "World" on row 1 (soft-wrapped)
+        assertEquals("Hello", buf.getScreenLine(0))
+        assertEquals("World", buf.getScreenLine(1))
+    }
+
+    @Test
+    fun `insertText sets wrappedFromPrevious on soft-wrapped lines`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.insertText("HelloWorld")
+        assertEquals("Hello", buf.getScreenLine(0))
+        assertEquals("World", buf.getScreenLine(1))
+    }
+
+    @Test
+    fun `explicit cursor movement does not set wrappedFromPrevious`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.writeText("Hello")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("World")
+        // Both lines are separate logical lines (hard break between them)
+        // Resize wider should NOT rejoin them
+        buf.resize(10, 3)
+        assertEquals("Hello", buf.getScreenLine(0))
+        assertEquals("World", buf.getScreenLine(1))
+    }
+
+    @Test
+    fun `insertEmptyLineAtBottom does not set wrappedFromPrevious`() {
+        val buf = TerminalBuffer(5, 2)
+        buf.writeText("Hello")
+        buf.insertEmptyLineAtBottom()
+        // "Hello" is in scrollback, new empty line on screen
+        // Resize wider: "Hello" is a single logical line, no soft-wrap to rejoin.
+        // The reflow rebuilds the buffer; with only 2 lines of content (Hello + empty),
+        // both fit on screen.
+        buf.resize(10, 2)
+        assertEquals("Hello", buf.getScreenLine(0))
+        assertEquals("", buf.getScreenLine(1))
+    }
+
+    @Test
+    fun `clearScreen resets wrappedFromPrevious flags`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.writeText("HelloWorld") // soft-wraps to 2 lines
+        buf.clearScreen()
+        // After clear, write new content and resize — should not rejoin with old structure
+        buf.writeText("Hi")
+        buf.resize(10, 3)
+        assertEquals("Hi", buf.getScreenLine(0))
+        assertEquals("", buf.getScreenLine(1))
+    }
+
+    // --- Reflow: resize wider (rejoin soft-wrapped lines) ---
+
+    @Test
+    fun `reflow resize wider rejoins soft-wrapped lines`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.writeText("HelloWorld")
+        // "Hello" on row 0, "World" on row 1
+        assertEquals("Hello", buf.getScreenLine(0))
+        assertEquals("World", buf.getScreenLine(1))
+        buf.resize(10, 3)
+        // Should rejoin into single line
+        assertEquals("HelloWorld", buf.getScreenLine(0))
+        assertEquals("", buf.getScreenLine(1))
+        assertEquals("", buf.getScreenLine(2))
+    }
+
+    @Test
+    fun `reflow resize wider does not rejoin hard-wrapped lines`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.writeText("Hello")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("World")
+        buf.resize(10, 3)
+        // "Hello" and "World" are separate logical lines — no rejoin
+        assertEquals("Hello", buf.getScreenLine(0))
+        assertEquals("World", buf.getScreenLine(1))
+        assertEquals("", buf.getScreenLine(2))
+    }
+
+    @Test
+    fun `reflow resize wider with multiple soft-wrapped lines`() {
+        val buf = TerminalBuffer(5, 5)
+        buf.writeText("AAAAABBBBBCCCCC")
+        // Three physical lines: "AAAAA", "BBBBB", "CCCCC" (all soft-wrapped)
+        assertEquals("AAAAA", buf.getScreenLine(0))
+        assertEquals("BBBBB", buf.getScreenLine(1))
+        assertEquals("CCCCC", buf.getScreenLine(2))
+        buf.resize(15, 5)
+        // All three should rejoin into one line
+        assertEquals("AAAAABBBBBCCCCC", buf.getScreenLine(0))
+        assertEquals("", buf.getScreenLine(1))
+    }
+
+    @Test
+    fun `reflow resize wider partially rejoins soft-wrapped lines`() {
+        val buf = TerminalBuffer(5, 5)
+        buf.writeText("AAAAABBBBBCCCCC")
+        buf.resize(10, 5)
+        // 15 chars into width 10: "AAAAABBBBB" on line 0, "CCCCC" on line 1
+        assertEquals("AAAAABBBBB", buf.getScreenLine(0))
+        assertEquals("CCCCC", buf.getScreenLine(1))
+    }
+
+    // --- Reflow: resize narrower (re-split lines) ---
+
+    @Test
+    fun `reflow resize narrower splits lines`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("ABCDEFGHIJ")
+        buf.resize(5, 3)
+        // "ABCDEFGHIJ" → "ABCDE" + "FGHIJ"
+        assertEquals("ABCDE", buf.getScreenLine(0))
+        assertEquals("FGHIJ", buf.getScreenLine(1))
+        assertEquals("", buf.getScreenLine(2))
+    }
+
+    @Test
+    fun `reflow resize narrower creates scrollback overflow`() {
+        val buf = TerminalBuffer(10, 2)
+        buf.writeText("ABCDEFGHIJ")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("KLMNOPQRST")
+        buf.resize(5, 2)
+        // "ABCDEFGHIJ" → "ABCDE" + "FGHIJ", "KLMNOPQRST" → "KLMNO" + "PQRST"
+        // 4 physical lines for 2-row screen → 2 to scrollback
+        assertEquals(2, buf.scrollbackSize)
+        assertEquals("ABCDE", buf.getLine(0))
+        assertEquals("FGHIJ", buf.getLine(1))
+        assertEquals("KLMNO", buf.getScreenLine(0))
+        assertEquals("PQRST", buf.getScreenLine(1))
+    }
+
+    // --- Reflow: round-trip ---
+
+    @Test
+    fun `reflow round-trip narrower then wider restores content`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("HelloWorld")
+        buf.resize(5, 3)
+        assertEquals("Hello", buf.getScreenLine(0))
+        assertEquals("World", buf.getScreenLine(1))
+        // Resize back to original width
+        buf.resize(10, 3)
+        assertEquals("HelloWorld", buf.getScreenLine(0))
+        assertEquals("", buf.getScreenLine(1))
+    }
+
+    @Test
+    fun `reflow round-trip wider then narrower preserves content`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.writeText("Hello")
+        buf.resize(10, 3)
+        assertEquals("Hello", buf.getScreenLine(0))
+        buf.resize(5, 3)
+        assertEquals("Hello", buf.getScreenLine(0))
+    }
+
+    // --- Reflow: with scrollback ---
+
+    @Test
+    fun `reflow includes scrollback lines`() {
+        val buf = TerminalBuffer(5, 2)
+        buf.writeText("AAAAABBBBB")
+        // "AAAAA" on row 0, "BBBBB" on row 1 (soft-wrapped)
+        buf.setCursorPosition(0, 1)
+        // Force "AAAAA" into scrollback by inserting empty line at bottom
+        buf.insertEmptyLineAtBottom()
+        // Now scrollback has "AAAAA", screen has ["BBBBB", empty]
+        // Actually "BBBBB" should still have wrappedFromPrevious = true
+        buf.resize(10, 2)
+        // "AAAAA" + "BBBBB" should rejoin into "AAAAABBBBB" since they were soft-wrapped
+        // Check that the content is preserved (either in scrollback or screen)
+        val fullContent = buf.getFullContent()
+        assertTrue(fullContent.contains("AAAAABBBBB"))
+    }
+
+    @Test
+    fun `reflow scrollback overflow respects maxScrollbackSize`() {
+        val buf = TerminalBuffer(10, 2, maxScrollbackSize = 2)
+        buf.writeText("ABCDEFGHIJ")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("KLMNOPQRST")
+        buf.resize(5, 2)
+        // 4 reflowed lines for 2-row screen → 2 to scrollback
+        // maxScrollbackSize = 2, so both fit
+        assertEquals(2, buf.scrollbackSize)
+        assertEquals("ABCDE", buf.getLine(0))
+        assertEquals("FGHIJ", buf.getLine(1))
+    }
+
+    @Test
+    fun `reflow scrollback overflow trims oldest when exceeding max`() {
+        val buf = TerminalBuffer(10, 2, maxScrollbackSize = 1)
+        buf.writeText("ABCDEFGHIJ")
+        buf.setCursorPosition(0, 1)
+        buf.writeText("KLMNOPQRST")
+        buf.resize(5, 2)
+        // 4 reflowed lines for 2-row screen → 2 to scrollback but max is 1
+        // Oldest scrollback line gets trimmed
+        assertEquals(1, buf.scrollbackSize)
+        // The most recent scrollback line should be "FGHIJ"
+        assertEquals("FGHIJ", buf.getLine(0))
+    }
+
+    // --- Reflow: cursor tracking ---
+
+    @Test
+    fun `reflow resize wider recomputes cursor position`() {
+        val buf = TerminalBuffer(5, 3)
+        buf.writeText("HelloWorld")
+        // Cursor should be at col 0, row 1 (after wrapping "World" starts on row 1, cursor at col 5 → wraps to row 1 col 0... actually col=10 mod 5=0, but after "World" cursor is at col=5 which triggers no wrap, cursorCol=5→width)
+        // Actually: after writeText("HelloWorld"), cursor is at col=0 on the NEXT wrap hasn't happened yet. Let me reconsider.
+        // 'H'→col1, 'e'→col2, 'l'→col3, 'l'→col4, 'o'→col5=width → wrap triggered for next char
+        // 'W'→col>=width, wrap: col=0, row=1. Write 'W' at (0,1). col=1.
+        // 'o'→col2, 'r'→col3, 'l'→col4, 'd'→col5=width.
+        // cursorCol=5, cursorRow=1
+        assertEquals(5, buf.cursorCol) // at end of "World"
+        assertEquals(1, buf.cursorRow)
+        buf.resize(10, 3)
+        // "HelloWorld" rejoins to one line. Cursor was at absolute offset 5 (line width) + 5 = 10
+        // On width 10: offset 10 → col 10 → clamped to 9 (width-1)
+        assertEquals(0, buf.cursorRow)
+        // Cursor should be at or near the end of "HelloWorld"
+        assertTrue(buf.cursorCol <= 9)
+    }
+
+    @Test
+    fun `reflow resize narrower recomputes cursor position`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("ABCDEFGHIJ")
+        // cursorCol=10 (at width), cursorRow=0
+        buf.resize(5, 3)
+        // "ABCDEFGHIJ" → "ABCDE" + "FGHIJ"
+        // Cursor absolute offset = 10, newWidth=5 → row 1, col 5 → clamped to col 4
+        // Actually countContentColumns returns lineWidth=5, so offset 10:
+        // Line 0 uses 5 cols → remaining=5, Line 1 uses 5 cols → remaining=0 → col=5 → clamped to 4
+        assertEquals(1, buf.cursorRow)
+        assertTrue(buf.cursorCol <= 4)
+    }
+
+    // --- Reflow: with text attributes ---
+
+    @Test
+    fun `reflow preserves text attributes across rejoin`() {
+        val buf = TerminalBuffer(5, 3)
+        val boldRed = CellAttributes(
+            foreground = TerminalColor.RED,
+            style = TextStyle(bold = true)
+        )
+        buf.setCurrentAttributes(boldRed)
+        buf.writeText("HelloWorld")
+        // "Hello" on row 0, "World" on row 1
+        buf.resize(10, 3)
+        // Rejoined: "HelloWorld" on row 0 with bold red attributes
+        assertEquals("HelloWorld", buf.getScreenLine(0))
+        val attrs = buf.getAttributesAt(0, buf.scrollbackSize)
+        assertEquals(TerminalColor.RED, attrs.foreground)
+        assertTrue(attrs.style.bold)
+        // Check attributes are preserved in the second half too
+        val attrsW = buf.getAttributesAt(5, buf.scrollbackSize)
+        assertEquals(TerminalColor.RED, attrsW.foreground)
+        assertTrue(attrsW.style.bold)
+    }
+
+    @Test
+    fun `reflow preserves mixed attributes across lines`() {
+        val buf = TerminalBuffer(5, 3)
+        val red = CellAttributes(foreground = TerminalColor.RED)
+        val blue = CellAttributes(foreground = TerminalColor.BLUE)
+        buf.setCurrentAttributes(red)
+        buf.writeText("Hello")
+        // cursorCol=5, still on row 0. Next char will wrap.
+        buf.setCurrentAttributes(blue)
+        buf.writeText("World")
+        // "Hello" in red (row 0), "World" in blue (row 1, soft-wrapped)
+        buf.resize(10, 3)
+        assertEquals("HelloWorld", buf.getScreenLine(0))
+        // First 5 chars should be red
+        assertEquals(TerminalColor.RED, buf.getAttributesAt(0, buf.scrollbackSize).foreground)
+        assertEquals(TerminalColor.RED, buf.getAttributesAt(4, buf.scrollbackSize).foreground)
+        // Last 5 chars should be blue
+        assertEquals(TerminalColor.BLUE, buf.getAttributesAt(5, buf.scrollbackSize).foreground)
+        assertEquals(TerminalColor.BLUE, buf.getAttributesAt(9, buf.scrollbackSize).foreground)
+    }
+
+    // --- Reflow: wide characters ---
+
+    @Test
+    fun `reflow with wide characters handles re-wrapping`() {
+        // \u4E16 = 世, a wide char (2 columns)
+        val buf = TerminalBuffer(4, 3)
+        buf.writeText("\u4E16\u4E16")
+        // Each 世 takes 2 cols. Width=4: 世(0,1)世(2,3) → fits exactly on one line
+        assertEquals("\u4E16\u4E16", buf.getScreenLine(0))
+        buf.resize(3, 3)
+        // Width=3: 世 takes 2 cols. First 世 at (0,1). Second 世 needs col 2,3 → only 1 col left → wraps.
+        // Line 0: 世 + empty. Line 1: 世
+        assertEquals("\u4E16", buf.getScreenLine(0))
+        assertEquals("\u4E16", buf.getScreenLine(1))
+    }
+
+    @Test
+    fun `reflow wide chars rejoin when widened`() {
+        val buf = TerminalBuffer(3, 3)
+        buf.writeText("\u4E16\u4E16")
+        // Width=3: 世(0,1), second 世 doesn't fit (needs col 2,3 but only 1 remaining) → wraps
+        // Line 0: 世. Line 1: 世 (soft-wrapped)
+        assertEquals("\u4E16", buf.getScreenLine(0))
+        assertEquals("\u4E16", buf.getScreenLine(1))
+        buf.resize(4, 3)
+        // Rejoin: 世世 fits in 4 columns
+        assertEquals("\u4E16\u4E16", buf.getScreenLine(0))
+        assertEquals("", buf.getScreenLine(1))
+    }
+
+    // --- Reflow: mixed hard and soft wraps ---
+
+    @Test
+    fun `reflow with mixed hard and soft wraps`() {
+        val buf = TerminalBuffer(5, 5)
+        buf.writeText("AAAAABBBBB") // soft-wraps: "AAAAA" + "BBBBB"
+        buf.setCursorPosition(0, 2) // hard break to row 2
+        buf.writeText("CCCCCDDDDDEEEEE") // soft-wraps: "CCCCC" + "DDDDD" + "EEEEE"
+        // Screen: "AAAAA", "BBBBB", "CCCCC", "DDDDD", "EEEEE"
+        assertEquals("AAAAA", buf.getScreenLine(0))
+        assertEquals("BBBBB", buf.getScreenLine(1))
+        assertEquals("CCCCC", buf.getScreenLine(2))
+        assertEquals("DDDDD", buf.getScreenLine(3))
+        assertEquals("EEEEE", buf.getScreenLine(4))
+        buf.resize(10, 5)
+        // Logical line 1: "AAAAABBBBB" (lines 0+1 rejoined)
+        // Logical line 2: "CCCCCDDDDDEEEE" (lines 2+3+4 rejoined)
+        assertEquals("AAAAABBBBB", buf.getScreenLine(0))
+        assertEquals("CCCCCDDDDD", buf.getScreenLine(1))
+        assertEquals("EEEEE", buf.getScreenLine(2))
+        assertEquals("", buf.getScreenLine(3))
+    }
+
+    // --- Reflow: edge cases ---
+
+    @Test
+    fun `reflow with empty buffer`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.resize(5, 2)
+        assertEquals(5, buf.width)
+        assertEquals(2, buf.height)
+        assertEquals("", buf.getScreenLine(0))
+        assertEquals("", buf.getScreenLine(1))
+    }
+
+    @Test
+    fun `reflow resize to 1 column`() {
+        val buf = TerminalBuffer(3, 2)
+        buf.writeText("ABC")
+        buf.resize(1, 5)
+        // Each character gets its own line
+        assertEquals("A", buf.getScreenLine(0))
+        assertEquals("B", buf.getScreenLine(1))
+        assertEquals("C", buf.getScreenLine(2))
+    }
+
+    @Test
+    fun `reflow resize from 1 column to wider`() {
+        val buf = TerminalBuffer(1, 5)
+        buf.writeText("ABCDE")
+        // Each char on its own line (all soft-wrapped)
+        assertEquals("A", buf.getScreenLine(0))
+        assertEquals("B", buf.getScreenLine(1))
+        assertEquals("C", buf.getScreenLine(2))
+        assertEquals("D", buf.getScreenLine(3))
+        assertEquals("E", buf.getScreenLine(4))
+        buf.resize(5, 3)
+        // All rejoin into "ABCDE"
+        assertEquals("ABCDE", buf.getScreenLine(0))
+    }
+
+    @Test
+    fun `reflow resize resets scroll region`() {
+        val buf = TerminalBuffer(10, 5)
+        buf.setScrollRegion(1, 3)
+        buf.resize(10, 4)
+        assertEquals(0, buf.scrollTop)
+        assertEquals(3, buf.scrollBottom)
+    }
+
+    @Test
+    fun `reflow same dimensions is a no-op`() {
+        val buf = TerminalBuffer(10, 3)
+        buf.writeText("Hello")
+        buf.setCursorPosition(3, 1)
+        buf.resize(10, 3)
+        assertEquals("Hello", buf.getScreenLine(0))
+        assertEquals(3, buf.cursorCol)
+        assertEquals(1, buf.cursorRow)
     }
 
     // ===== Scroll region tests =====

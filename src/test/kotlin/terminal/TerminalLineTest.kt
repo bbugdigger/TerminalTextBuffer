@@ -914,6 +914,78 @@ class TerminalLineTest {
         assertEquals('B', line.getCell(4).character)
     }
 
+    // --- wrappedFromPrevious ---
+
+    @Test
+    fun `wrappedFromPrevious defaults to false`() {
+        val line = TerminalLine(10)
+        assertFalse(line.wrappedFromPrevious)
+    }
+
+    @Test
+    fun `wrappedFromPrevious can be set to true`() {
+        val line = TerminalLine(10)
+        line.wrappedFromPrevious = true
+        assertTrue(line.wrappedFromPrevious)
+    }
+
+    @Test
+    fun `copy preserves wrappedFromPrevious`() {
+        val line = TerminalLine(10)
+        line.wrappedFromPrevious = true
+        line.writeText(0, "Hello", defaultAttrs)
+        val copy = line.copy()
+        assertTrue(copy.wrappedFromPrevious)
+        assertEquals("Hello", copy.getText())
+    }
+
+    @Test
+    fun `copy preserves wrappedFromPrevious when false`() {
+        val line = TerminalLine(10)
+        line.writeText(0, "Hello", defaultAttrs)
+        val copy = line.copy()
+        assertFalse(copy.wrappedFromPrevious)
+    }
+
+    @Test
+    fun `copyWithWidth preserves wrappedFromPrevious`() {
+        val line = TerminalLine(10)
+        line.wrappedFromPrevious = true
+        line.writeText(0, "Hello", defaultAttrs)
+        val wider = line.copyWithWidth(20)
+        assertTrue(wider.wrappedFromPrevious)
+        assertEquals("Hello", wider.getText())
+    }
+
+    @Test
+    fun `copyWithWidth preserves wrappedFromPrevious when false`() {
+        val line = TerminalLine(10)
+        line.writeText(0, "Hello", defaultAttrs)
+        val narrower = line.copyWithWidth(3)
+        assertFalse(narrower.wrappedFromPrevious)
+    }
+
+    @Test
+    fun `clear does not reset wrappedFromPrevious`() {
+        val line = TerminalLine(10)
+        line.wrappedFromPrevious = true
+        line.writeText(0, "Hello", defaultAttrs)
+        line.clear()
+        // clear() resets content but wrappedFromPrevious is structural metadata
+        assertTrue(line.wrappedFromPrevious)
+    }
+
+    @Test
+    fun `getCells returns all cells`() {
+        val line = TerminalLine(5)
+        line.writeText(0, "Hi", defaultAttrs)
+        val cells = line.getCells()
+        assertEquals(5, cells.size)
+        assertEquals('H', cells[0].character)
+        assertEquals('i', cells[1].character)
+        assertEquals(' ', cells[2].character)
+    }
+
     // --- Dirty tracking ---
 
     @Test
