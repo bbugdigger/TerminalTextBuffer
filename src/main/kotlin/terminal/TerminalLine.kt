@@ -31,6 +31,29 @@ class TerminalLine(val width: Int) {
      */
     var wrappedFromPrevious: Boolean = false
 
+    /**
+     * Indicates whether this line has been modified since the last time it was marked clean.
+     *
+     * Newly created lines start dirty so that a rendering layer will draw them on its first
+     * pass. Any mutation (setCell, writeText, insertText, fill, clear, deleteChars, insertBlanks)
+     * sets this flag to true. The rendering layer should call [markClean] after drawing the line.
+     *
+     * Read-only operations (getCell, getText, getCells, etc.) do not affect this flag.
+     * Setting [wrappedFromPrevious] does not affect this flag either, since it is structural
+     * metadata used by the reflow algorithm, not visual content.
+     */
+    var dirty: Boolean = true
+        private set
+
+    /**
+     * Marks this line as clean (not dirty). A rendering layer should call this after
+     * drawing the line, so that subsequent queries only report lines that changed
+     * since the last render.
+     */
+    fun markClean() {
+        dirty = false
+    }
+
     private val cells: Array<Cell> = Array(width) { Cell.EMPTY }
 
     /**
@@ -52,6 +75,7 @@ class TerminalLine(val width: Int) {
      * @throws IndexOutOfBoundsException if [col] is outside [0, width).
      */
     fun setCell(col: Int, cell: Cell) {
+        dirty = true
         requireValidColumn(col)
         cleanUpWideChar(col)
         cells[col] = cell
@@ -68,6 +92,7 @@ class TerminalLine(val width: Int) {
      *         This value may equal [width] if writing reached the end of the line.
      */
     fun writeText(startCol: Int, text: String, attributes: CellAttributes): Int {
+        dirty = true
         var col = startCol
         for (char in text) {
             val charW = Cell.charWidth(char)
@@ -100,6 +125,7 @@ class TerminalLine(val width: Int) {
      *         This value may equal [width] if insertion reached the end of the line.
      */
     fun insertText(startCol: Int, text: String, attributes: CellAttributes): Int {
+        dirty = true
         var col = startCol
         for (char in text) {
             val charW = Cell.charWidth(char)
@@ -129,6 +155,7 @@ class TerminalLine(val width: Int) {
      * Wide characters are not supported for fill — only single-width characters are used.
      */
     fun fill(char: Char? = null, attributes: CellAttributes = CellAttributes.DEFAULT) {
+        dirty = true
         val fillCell = if (char == null) {
             Cell.EMPTY
         } else {
@@ -141,6 +168,7 @@ class TerminalLine(val width: Int) {
      * Clears the entire line, resetting all cells to [Cell.EMPTY].
      */
     fun clear() {
+        dirty = true
         cells.fill(Cell.EMPTY)
     }
 
@@ -225,6 +253,7 @@ class TerminalLine(val width: Int) {
      */
     fun deleteChars(startCol: Int, n: Int) {
         if (startCol >= width || n <= 0) return
+        dirty = true
         val effectiveN = n.coerceAtMost(width - startCol)
 
         // Clean up wide char at startCol (cursor might be on a continuation cell)
@@ -266,6 +295,7 @@ class TerminalLine(val width: Int) {
      */
     fun insertBlanks(startCol: Int, n: Int, attributes: CellAttributes = CellAttributes.DEFAULT) {
         if (startCol >= width || n <= 0) return
+        dirty = true
         val effectiveN = n.coerceAtMost(width - startCol)
 
         // Clean up wide char at startCol (cursor might be on a continuation cell)
