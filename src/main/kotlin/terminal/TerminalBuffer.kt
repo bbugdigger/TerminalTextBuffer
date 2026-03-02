@@ -166,6 +166,7 @@ class TerminalBuffer(
      */
     fun scrollUp(n: Int = 1) {
         require(n >= 0) { "Scroll amount must be non-negative, got $n" }
+        selection = null
         val effectiveN = n.coerceAtMost(scrollBottom - scrollTop + 1)
         for (i in 0 until effectiveN) {
             val removedLine = screen.removeAt(scrollTop)
@@ -195,10 +196,226 @@ class TerminalBuffer(
      */
     fun scrollDown(n: Int = 1) {
         require(n >= 0) { "Scroll amount must be non-negative, got $n" }
+        selection = null
         val effectiveN = n.coerceAtMost(scrollBottom - scrollTop + 1)
         for (i in 0 until effectiveN) {
             screen.removeAt(scrollBottom)
             screen.add(scrollTop, TerminalLine(width))
+        }
+    }
+
+    // --- Selection ---
+
+    /**
+     * The current selection range, or null if no selection is active.
+     *
+     * The selection uses absolute row addressing (row 0 is the oldest scrollback line).
+     * The range is always normalized so that the start position is before or equal to
+     * the end position. Wide character boundaries are snapped outward so that partial
+     * wide characters are never selected.
+     *
+     * Selection is automatically cleared by any content-mutating operation (writeText,
+     * insertText, scrollUp, resize, etc.).
+     */
+    var selection: SelectionRange? = null
+        private set
+
+    /**
+     * Returns true if there is an active selection.
+     */
+    fun hasSelection(): Boolean = selection != null
+
+    /**
+     * Sets the selection range using absolute row addressing.
+     *
+     * The start and end positions may be given in any order — the implementation
+     * normalizes them so that the start is always before or equal to the end.
+     *
+     * Column values are clamped to `[0, width]`. Row values are clamped to
+     * `[0, totalLineCount - 1]`. If the resulting range is empty (start equals end),
+     * the selection is cleared instead.
+     *
+     * Wide character boundaries are adjusted:
+     * - If the start column falls on a continuation cell, it is snapped left to
+     *   include the wide character's main cell.
+     * - If the last included column (endCol - 1) is a wide character's main cell,
+     *   endCol is snapped right to include the continuation cell.
+     *
+     * @param startRow Absolute row of one end of the selection.
+     * @param startCol Column of one end of the selection.
+     * @param endRow Absolute row of the other end of the selection.
+     * @param endCol Column one past the other end of the selection (exclusive).
+     */
+    fun setSelection(startRow: Int, startCol: Int, endRow: Int, endCol: Int) {
+        // Clamp to buffer bounds
+        val maxRow = (totalLineCount - 1).coerceAtLeast(0)
+        var r1 = startRow.coerceIn(0, maxRow)
+        var c1 = startCol.coerceIn(0, width)
+        var r2 = endRow.coerceIn(0, maxRow)
+        var c2 = endCol.coerceIn(0, width)
+
+        // Normalize so (r1, c1) <= (r2, c2)
+        if (r1 > r2 || (r1 == r2 && c1 > c2)) {
+            val tmpR = r1; val tmpC = c1
+            r1 = r2; c1 = c2
+            r2 = tmpR; c2 = tmpC
+        }
+
+        // Snap wide character boundaries outward
+        c1 = snapSelectionStart(r1, c1)
+        c2 = snapSelectionEnd(r2, c2)
+
+        // If the range is empty, clear instead
+        if (r1 == r2 && c1 == c2) {
+            selection = null
+            return
+        }
+
+        selection = SelectionRange(r1, c1, r2, c2)
+    }
+
+    /**
+     * Clears the current selection.
+     */
+    fun clearSelection() {
+        selection = null
+    }
+
+    /**
+     * Returns whether the cell at the given absolute position is inside the current selection.
+     *
+     * For stream selection, a cell at (row, col) is selected if:
+     * - On the start row: col >= startCol
+     * - On the end row: col < endCol
+     * - On rows between start and end: all columns are selected
+     * - On a single-line selection (startRow == endRow): startCol <= col < endCol
+     *
+     * Returns false if there is no active selection.
+     *
+     * @param absoluteRow The absolute row index.
+     * @param col The column index.
+     */
+    fun isSelected(absoluteRow: Int, col: Int): Boolean {
+        val sel = selection ?: return false
+
+        if (absoluteRow < sel.startRow || absoluteRow > sel.endRow) return false
+
+        return if (sel.startRow == sel.endRow) {
+            // Single-line selection
+            col >= sel.startCol && col < sel.endCol
+        } else if (absoluteRow == sel.startRow) {
+            // First line of multi-line selection
+            col >= sel.startCol
+        } else if (absoluteRow == sel.endRow) {
+            // Last line of multi-line selection
+            col < sel.endCol
+        } else {
+            // Middle line — fully selected
+            true
+        }
+    }
+
+    /**
+     * Extracts the selected text from the buffer.
+     *
+     * Returns the text within the current selection, or null if no selection is active.
+     *
+     * Soft-wrapped lines (where [TerminalLine.wrappedFromPrevious] is true) are joined
+     * without inserting a newline, so the extracted text reflects the logical content
+     * the user originally typed. Hard line breaks produce `\n` in the output.
+     *
+     * Trailing spaces are trimmed from each line's contribution, except for lines that
+     * are soft-wrapped continuations where the full width contributes to the logical line.
+     *
+     * If the selection references rows that no longer exist (e.g., scrollback was trimmed),
+     * those rows are skipped.
+     */
+    fun getSelectedText(): String? {
+        val sel = selection ?: return null
+        val sb = StringBuilder()
+
+        for (row in sel.startRow..sel.endRow) {
+            // Skip rows that are out of bounds (scrollback may have been trimmed)
+            if (row < 0 || row >= totalLineCount) continue
+
+            val line = getLineByAbsoluteRow(row)
+
+            // Determine the column range for this row
+            val colStart = if (row == sel.startRow) sel.startCol else 0
+            val colEnd = if (row == sel.endRow) sel.endCol else width
+
+            // Extract characters from the column range
+            val lineText = extractLineRange(line, colStart, colEnd)
+
+            // Determine whether to insert a newline before this row's text
+            if (row > sel.startRow) {
+                val isWrapped = line.wrappedFromPrevious
+                if (!isWrapped) {
+                    sb.append('\n')
+                }
+            }
+
+            // Trim trailing spaces unless this is a soft-wrapped line that continues
+            // to the next line (trailing spaces are part of the logical content).
+            val nextRow = row + 1
+            val continuesWithWrap = nextRow <= sel.endRow &&
+                    nextRow < totalLineCount &&
+                    getLineByAbsoluteRow(nextRow).wrappedFromPrevious
+            if (continuesWithWrap) {
+                sb.append(lineText)
+            } else {
+                sb.append(lineText.trimEnd())
+            }
+        }
+
+        return sb.toString()
+    }
+
+    /**
+     * Extracts characters from a line within the given column range [colStart, colEnd).
+     *
+     * Continuation cells are skipped (they are the trailing half of wide characters
+     * and don't contribute a character). The result preserves the characters as they
+     * appear in the cells.
+     */
+    private fun extractLineRange(line: TerminalLine, colStart: Int, colEnd: Int): String {
+        val sb = StringBuilder()
+        val effectiveEnd = colEnd.coerceAtMost(line.width)
+        for (col in colStart until effectiveEnd) {
+            val cell = line.getCell(col)
+            if (!cell.isContinuation) {
+                sb.append(cell.character)
+            }
+        }
+        return sb.toString()
+    }
+
+    /**
+     * Snaps a selection start column to the left if it falls on a continuation cell
+     * (the trailing half of a wide character), so the entire wide character is included.
+     */
+    private fun snapSelectionStart(absoluteRow: Int, col: Int): Int {
+        if (col <= 0 || col >= width || absoluteRow < 0 || absoluteRow >= totalLineCount) return col
+        val line = getLineByAbsoluteRow(absoluteRow)
+        val cell = line.getCell(col)
+        return if (cell.isContinuation && col > 0) col - 1 else col
+    }
+
+    /**
+     * Snaps a selection end column to the right if the last included column (endCol - 1)
+     * is a wide character's main cell, so the continuation cell is also included.
+     * Since endCol is exclusive, this means incrementing it by 1.
+     */
+    private fun snapSelectionEnd(absoluteRow: Int, col: Int): Int {
+        if (col <= 0 || col > width || absoluteRow < 0 || absoluteRow >= totalLineCount) return col
+        val lastIncluded = col - 1
+        if (lastIncluded < 0 || lastIncluded >= width) return col
+        val line = getLineByAbsoluteRow(absoluteRow)
+        val cell = line.getCell(lastIncluded)
+        return if (cell.width == 2 && lastIncluded + 1 < width) {
+            (col + 1).coerceAtMost(width)
+        } else {
+            col
         }
     }
 
@@ -218,6 +435,7 @@ class TerminalBuffer(
      * The cursor is advanced to the position after the last written character.
      */
     fun writeText(text: String) {
+        selection = null
         for (char in text) {
             val charW = Cell.charWidth(char)
 
@@ -255,6 +473,7 @@ class TerminalBuffer(
      * The cursor is advanced to the position after the last inserted character.
      */
     fun insertText(text: String) {
+        selection = null
         for (char in text) {
             val charW = Cell.charWidth(char)
 
@@ -287,6 +506,7 @@ class TerminalBuffer(
      * @param n The number of characters to delete. Clamped to the remaining line width.
      */
     fun deleteChars(n: Int) {
+        selection = null
         screen[cursorRow].deleteChars(cursorCol, n)
     }
 
@@ -304,6 +524,7 @@ class TerminalBuffer(
      * @param n The number of blank cells to insert. Clamped to the remaining line width.
      */
     fun insertBlanks(n: Int) {
+        selection = null
         screen[cursorRow].insertBlanks(cursorCol, n, currentAttributes)
     }
 
@@ -314,6 +535,7 @@ class TerminalBuffer(
      * The cursor position is not modified.
      */
     fun fillLine(char: Char? = null) {
+        selection = null
         if (char == null) {
             screen[cursorRow].fill(null)
         } else {
@@ -333,6 +555,7 @@ class TerminalBuffer(
      * The cursor position is not modified.
      */
     fun insertEmptyLineAtBottom() {
+        selection = null
         scrollTopLine()
         screen.add(TerminalLine(width))
     }
@@ -344,6 +567,7 @@ class TerminalBuffer(
      * full screen. Scrollback is not affected.
      */
     fun clearScreen() {
+        selection = null
         for (line in screen) {
             line.clear()
             line.wrappedFromPrevious = false
@@ -360,6 +584,7 @@ class TerminalBuffer(
      * The cursor is reset to position (0, 0).
      */
     fun clearAll() {
+        selection = null
         clearScreen()
         scrollback.clear()
     }
@@ -387,6 +612,7 @@ class TerminalBuffer(
     fun resize(newWidth: Int, newHeight: Int) {
         require(newWidth > 0) { "New width must be positive, got $newWidth" }
         require(newHeight > 0) { "New height must be positive, got $newHeight" }
+        selection = null
 
         // If nothing changed, no work to do (still reset scroll region for consistency)
         if (newWidth == width && newHeight == height) {
